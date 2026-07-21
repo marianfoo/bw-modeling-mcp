@@ -26,6 +26,40 @@ export interface GetResult {
   headers: Record<string, string>;
 }
 
+/** Cloud Connector hop. `token` is a connectivity JWT and expires — build one per request. */
+export interface BwProxyConfig {
+  host: string;
+  port: number;
+  /** Connectivity-service access token, sent as `Proxy-Authorization: Bearer …`. */
+  token: string;
+  /** Sent as `SAP-Connectivity-SCC-Location_ID` when several CCs serve the subaccount. */
+  locationId?: string;
+}
+
+/**
+ * How a client authenticates to BW. Exactly one mode; they cannot be combined.
+ *
+ * There is deliberately no way to express "principal propagation *and* a shared
+ * credential". A per-user client that can fall back to BW_USER/BW_PASSWORD is a
+ * principal-propagation server with an admin backdoor, so the type forbids it
+ * rather than a runtime flag discouraging it.
+ */
+export type BwAuth =
+  /** stdio / local development. */
+  | { kind: 'basic'; user: string; password: string }
+  /** stdio against a SAML/OAuth-fronted system, cookies exported from a browser. */
+  | { kind: 'cookies'; cookies: Record<string, string> }
+  /** BTP principal propagation: the value for the `SAP-Connectivity-Authentication` header. */
+  | { kind: 'pp'; connectivityAuth: string };
+
+export interface BwClientOptions {
+  url: string;
+  auth: BwAuth;
+  client?: string;
+  language?: string;
+  proxy?: BwProxyConfig;
+}
+
 export class BwClient {
   private http: AxiosInstance;
   private csrfToken: string | null = null;
@@ -33,56 +67,72 @@ export class BwClient {
   // SAP sessions time out after ~5 minutes of inactivity; refresh the token before that.
   private static readonly CSRF_TOKEN_TTL_MS = 4 * 60 * 1000;
   private cookies: Map<string, string> = new Map();
-  // Basic Auth is only sent during the initial CSRF fetch to establish the session.
-  // All subsequent requests use the session cookie only — sending Basic Auth on PUT
-  // causes SAP to create a new stateless session, invalidating the lock handle.
-  private readonly basicAuth: string | null;
+  private readonly auth: BwAuth;
+  private readonly proxy?: BwProxyConfig;
   private readonly frozenCookies: Set<string> = new Set();
-  // Temporary session diagnostics — enable with BW_DEBUG_SESSION=1 (or "true").
+  // Session diagnostics — enable with BW_DEBUG_SESSION=1 (or "true").
   // All debug output goes to stderr so it never corrupts the MCP stdio protocol.
   private readonly sessionDebug: boolean =
     process.env.BW_DEBUG_SESSION === '1' || process.env.BW_DEBUG_SESSION === 'true';
 
-  constructor(
-    url: string,
-    user: string | null,
-    password: string | null,
-    client: string,
-    language?: string,
-    initialCookies?: Record<string, string>
-  ) {
-    this.basicAuth = (user && password)
-      ? 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64')
-      : null;
+  constructor(opts: BwClientOptions) {
+    this.auth = opts.auth;
+    this.proxy = opts.proxy;
 
-    // In cookie mode (e.g. BW Bridge): do not send sap-client and X-sap-adt-sessiontype
-    // as global defaults. BW Bridge rejects stateful requests with 401 when no
-    // pre-established backend session exists on the app instance pointed to by __VCAP_ID__.
-    const isCookieMode = initialCookies !== undefined;
+    // Neither cookie mode nor PP sends `X-sap-adt-sessiontype: stateful`:
+    //  - BW Bridge 401s on stateful requests with no pre-established backend session.
+    //  - Under PP each request carries its own short-lived identity, so a stateful
+    //    session would pin to one work process for no benefit. Every tool here reads.
+    const stateful = opts.auth.kind === 'basic';
     this.http = axios.create({
-      baseURL: url,
+      baseURL: opts.url,
+      proxy: opts.proxy
+        ? { host: opts.proxy.host, port: opts.proxy.port, protocol: 'http' }
+        : false,
       headers: {
-        ...(isCookieMode ? {} : {
-          'sap-client': client,
-          'X-sap-adt-sessiontype': 'stateful',
-        }),
-        ...(language ? { 'sap-language': language } : {}),
+        ...(opts.client ? { 'sap-client': opts.client } : {}),
+        ...(stateful ? { 'X-sap-adt-sessiontype': 'stateful' } : {}),
+        ...(opts.language ? { 'sap-language': opts.language } : {}),
       },
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      // Direct connections may hit a self-signed BW certificate. Through the Cloud
+      // Connector the app→proxy hop is plain HTTP and the CC owns TLS to the backend,
+      // so this only ever applies to the local/stdio path.
+      ...(opts.proxy ? {} : { httpsAgent: new https.Agent({ rejectUnauthorized: !process.env.BW_INSECURE }) }),
       validateStatus: () => true,
     });
     delete this.http.defaults.headers.post['Content-Type'];
     delete (this.http.defaults.headers as any).common['Content-Type'];
 
-    // Cookie mode: pre-populate cookie store from caller. Used for SAML/OAuth-fronted
-    // systems where Basic Auth is not available and cookies are exported from a browser.
-    if (initialCookies) {
-      for (const [name, value] of Object.entries(initialCookies)) {
+    if (opts.auth.kind === 'cookies') {
+      for (const [name, value] of Object.entries(opts.auth.cookies)) {
         this.cookies.set(name, value);
         // Names from the cookie file are frozen — set-cookie responses must not overwrite them.
         this.frozenCookies.add(name);
       }
     }
+  }
+
+  /**
+   * Per-request auth headers. The single place any credential reaches the wire.
+   *
+   * PP sends two *different* tokens: `SAP-Connectivity-Authentication` carries the
+   * user identity for the Cloud Connector to convert into a short-lived X.509 cert,
+   * while `Proxy-Authorization` authenticates this app to the connectivity proxy.
+   * `Authorization` is never sent in a PP scenario — SAP reserves it for basic auth
+   * to the backend, and sending it here breaks identity propagation.
+   */
+  private authHeaders(): Record<string, string> {
+    const h: Record<string, string> = {};
+    if (this.auth.kind === 'basic') {
+      h['Authorization'] = 'Basic ' + Buffer.from(`${this.auth.user}:${this.auth.password}`).toString('base64');
+    } else if (this.auth.kind === 'pp') {
+      h['SAP-Connectivity-Authentication'] = this.auth.connectivityAuth;
+    }
+    if (this.proxy) {
+      h['Proxy-Authorization'] = `Bearer ${this.proxy.token}`;
+      if (this.proxy.locationId) h['SAP-Connectivity-SCC-Location_ID'] = this.proxy.locationId;
+    }
+    return h;
   }
 
   // ── Session info (debug) ──────────────────────────────────────────────────
@@ -151,7 +201,7 @@ export class BwClient {
       headers: {
         'X-CSRF-Token': 'Fetch',
         Accept: 'application/xml',
-        ...(this.basicAuth ? { Authorization: this.basicAuth } : {}),
+        ...this.authHeaders(),
         ...this.cookieHeaders(),
       },
       responseType: 'text',
@@ -159,7 +209,7 @@ export class BwClient {
     this.updateCookies(response);
     const token = response.headers['x-csrf-token'] as string | undefined;
     if (!token || token.toLowerCase() === 'fetch') {
-      if (this.basicAuth) {
+      if (this.auth.kind === 'basic') {
         throw new Error(
           `Failed to fetch CSRF token (HTTP ${response.status}). Check BW_URL, BW_USER, BW_PASSWORD, BW_CLIENT.`
         );
@@ -217,6 +267,7 @@ export class BwClient {
         Accept: resolvedAccept,
         'bwmt-level': '50',
         'X-CSRF-Token': this.csrfToken!,
+        ...this.authHeaders(),
         ...this.cookieHeaders(),
       },
       responseType: 'text',
@@ -270,7 +321,7 @@ export class BwClient {
     const cookieHdr = this.cookieHeader();
     const response = await freshHttp.post(url, body, {
       headers: {
-        ...(this.basicAuth ? { Authorization: this.basicAuth } : {}),
+        ...this.authHeaders(),
         ...(cookieHdr ? { Cookie: cookieHdr } : {}),
         ...headers,
       },
@@ -299,6 +350,7 @@ export class BwClient {
     const response = await this.http.get(url, {
       headers: {
         'X-CSRF-Token': this.csrfToken!,
+        ...this.authHeaders(),
         ...this.cookieHeaders(),
         ...headers,
       },
@@ -324,7 +376,7 @@ export class BwClient {
     const response = await this.http.get('/sap/bw/modeling/discovery', {
       headers: {
         Accept: 'application/atomsvc+xml',
-        ...(this.basicAuth ? { Authorization: this.basicAuth } : {}),
+        ...this.authHeaders(),
         ...this.cookieHeaders(),
       },
       responseType: 'text',
@@ -370,6 +422,15 @@ export class BwClient {
 
 }
 
+/**
+ * Shared client from environment variables. This is the stdio / local-development
+ * path only: it holds one credential for every caller.
+ *
+ * The HTTP transport never calls this — see createPerUserClient() in pp-client.ts.
+ * assertNoSharedCredentials() (http.ts) refuses to start the server if these
+ * variables are set alongside principal propagation, so a shared session can never
+ * shadow a per-user identity.
+ */
 export function createClientFromEnv(): BwClient {
   const url = process.env.BW_URL;
   const client = process.env.BW_CLIENT ?? '001';
@@ -412,9 +473,7 @@ export function createClientFromEnv(): BwClient {
         `BW_COOKIE_FILE at ${cookieFile} contains no parseable cookies (expected Netscape or name=value format).`
       );
     }
-    const userOpt = process.env.BW_USER ?? null;
-    const passwordOpt = process.env.BW_PASSWORD ?? null;
-    return new BwClient(url, userOpt, passwordOpt, client, language, cookies);
+    return new BwClient({ url, client, language, auth: { kind: 'cookies', cookies } });
   }
 
   // Basic Auth mode: classic on-premise BW/4HANA — unchanged from previous behavior.
@@ -425,6 +484,6 @@ export function createClientFromEnv(): BwClient {
       'Required environment variables missing: BW_URL, BW_USER, BW_PASSWORD'
     );
   }
-  return new BwClient(url, user, password, client, language);
+  return new BwClient({ url, client, language, auth: { kind: 'basic', user, password } });
 }
 

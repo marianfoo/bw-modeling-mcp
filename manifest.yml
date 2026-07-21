@@ -1,0 +1,42 @@
+---
+# bw-modeling-mcp on SAP BTP Cloud Foundry.
+#
+# Read-only by construction: the write tools are not in the build, so there is no
+# runtime flag to get wrong. See docs/DEPLOYMENT.md for the Cloud Connector and
+# ABAP-side steps, which are the long pole — start them before you deploy this.
+applications:
+  - name: bw-modeling-mcp
+    memory: 512M
+    disk_quota: 1G
+    instances: 1
+    buildpacks:
+      - nodejs_buildpack
+    command: npm run start:http
+    health-check-type: http
+    health-check-http-endpoint: /health
+    env:
+      NODE_ENV: production
+      # BW client and language. sap-client is NOT a documented destination property
+      # for PrincipalPropagation, so it is configured here and sent as a header.
+      BW_CLIENT: "100"
+      BW_LANGUAGE: "EN"
+      # Destination with Authentication=PrincipalPropagation, ProxyType=OnPremise,
+      # and URL=http://<cc-virtual-host>:<port>.
+      # The URL must be http:// — an https:// destination makes the HTTP client
+      # tunnel with CONNECT, which silently drops the principal-propagation headers
+      # and returns 405. The Cloud Connector still uses HTTPS to reach BW.
+      BW_BTP_PP_DESTINATION: "BW4_PP"
+      # Only when several Cloud Connectors serve this subaccount.
+      # BW_CC_LOCATION_ID: "bw-prod"
+      # Public route, if behind a reverse proxy that rewrites Host.
+      # BW_PUBLIC_URL: "https://bw-modeling-mcp.example.com"
+      # CORS, only for browser-based MCP clients. Native clients do not need it.
+      # BW_ALLOWED_ORIGINS: "https://claude.ai"
+      #
+      # BW_USER / BW_PASSWORD / BW_COOKIE_FILE are deliberately absent. The server
+      # refuses to start if they are set: a shared BW session silently overrides
+      # per-user identity, and nothing in the logs would show it.
+    services:
+      - bwmcp-xsuaa
+      - bwmcp-destination
+      - bwmcp-connectivity

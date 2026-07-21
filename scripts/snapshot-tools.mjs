@@ -2,7 +2,7 @@
 //   node scripts/snapshot-tools.mjs > tests/fixtures/tools.json
 import { spawn } from 'node:child_process';
 
-const srv = spawn('node', ['dist/index.js'], {
+const srv = spawn('node', ['dist/stdio.js'], {
   env: { ...process.env, BW_URL: 'http://snapshot.invalid:8000', BW_USER: 'X', BW_PASSWORD: 'X' },
   stdio: ['pipe', 'pipe', 'pipe'],
 });

@@ -8,7 +8,9 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { createClientFromEnv } from './bw-client.js';
+import type { BwClient } from './bw-client.js';
+import { currentClient } from './request-context.js';
+import { filterToolsByScope, hasScope, requiredScope } from './scopes.js';
 import { bwGetAdso } from './tools/adso.js';
 import { bwGetInfoObject } from './tools/infoobject.js';
 import { bwGetTransformation } from './tools/transformation.js';
@@ -32,9 +34,6 @@ import { bwGetOpenHub } from './tools/openhub.js';
 import { bwGetAggregationLevel, bwGetPlanningProperties, bwGetPlanningSequence, bwGetPlanningFunction } from './tools/planning.js';
 import { bwListProcessChainRuns, bwGetProcessChainRunDetail, bwListProcessChainLastStatus } from './tools/process_chain_monitor.js';
 
-// Single shared client instance (CSRF token + session cookies are reused)
-const client = createClientFromEnv();
-
 const server = new Server(
   { name: 'bw-modeling-mcp', version: '0.1.0' },
   { capabilities: { tools: {} } }
@@ -42,8 +41,8 @@ const server = new Server(
 
 // ── Tool definitions ─────────────────────────────────────────────────────────
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => ({
+  tools: filterToolsByScope([
     {
       name: 'bw_search',
       description:
@@ -1105,15 +1104,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: [],
       },
     },
-  ],
+  ], extra.authInfo),
 }));
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args } = request.params;
 
+  if (!hasScope(extra.authInfo, requiredScope(name))) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Tool '${name}' requires the '${requiredScope(name)}' scope.`,
+    );
+  }
+
+  // Whoever established the request context owns the identity: the stdio bootstrap
+  // installs one shared env client, the HTTP transport installs a per-user PP client.
+  // Throws rather than falling back to environment credentials.
+  const client = currentClient();
+
   try {
+    await ensureMediaTypes(client);
     let text: string;
 
     switch (name) {
@@ -1437,21 +1449,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+// ── Discovery ─────────────────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
-  try {
-    await client.loadMediaTypes();
-  } catch (err) {
-    process.stderr.write(`[bw-modeling-mcp] Warning: discovery failed, using hardcoded media type fallbacks (${err})\n`);
+/**
+ * Populate MEDIA_TYPES on first use rather than at startup.
+ *
+ * Under principal propagation there are no credentials at boot, so discovery cannot
+ * run there. It is also system metadata — the type->MIME map is identical for every
+ * user — so one process-wide cache is correct.
+ *
+ * The promise is cleared on failure: without that, a single transient 503 during the
+ * very first request would poison MEDIA_TYPES for the life of the process, and every
+ * later read would fail with a misleading "object type not supported on this system".
+ */
+let discovery: Promise<void> | null = null;
+export function ensureMediaTypes(client: BwClient): Promise<void> {
+  if (!discovery) {
+    discovery = client.loadMediaTypes().catch((err) => {
+      discovery = null;
+      process.stderr.write(`[bw-modeling-mcp] discovery failed, using hardcoded media type fallbacks (${err})\n`);
+    });
   }
+  return discovery;
+}
+
+export { server };
+
+// ── Start (stdio) ─────────────────────────────────────────────────────────────
+
+export async function startStdio(): Promise<void> {
+  const { createClientFromEnv } = await import('./bw-client.js');
+  const { setStdioFallbackClient } = await import('./request-context.js');
+
+  // stdio has no per-request identity to propagate, so one shared client serves the
+  // whole process. This is the only place a shared credential is legitimate.
+  setStdioFallbackClient(createClientFromEnv());
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Log to stderr only (stdout is used for MCP protocol messages)
-  process.stderr.write('bw-modeling-mcp server started\n');
+  process.stderr.write('bw-modeling-mcp server started (stdio)\n');
 }
-
-main().catch((err) => {
-  process.stderr.write(`Fatal error: ${err}\n`);
-  process.exit(1);
-});

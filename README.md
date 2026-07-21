@@ -1,8 +1,28 @@
 # bw-modeling-mcp
 
-A Model Context Protocol (MCP) server that enables AI assistants like Claude to work directly inside SAP BW/4HANA systems — reading, creating and modifying BW modeling objects via the internal REST API used by Eclipse BWMT.
+A Model Context Protocol (MCP) server that lets AI assistants read SAP BW/4HANA modeling
+objects via the internal REST API used by Eclipse BWMT.
 
-**This is not a simulation.** Every tool call connects to a live BW system — write operations produce real changes.
+> ### This fork is read-only, and deploys to SAP BTP Cloud Foundry
+>
+> It diverges from [dnic-dev/bw-modeling-mcp](https://github.com/dnic-dev/bw-modeling-mcp)
+> upstream in three ways:
+>
+> - **39 tools, all reads.** The 42 write tools are *deleted*, not flag-gated — along
+>   with the lock/CSRF/activate machinery behind them. There is no configuration that
+>   turns writing back on. This matters because neither `S_ADT_RES` (a URI allowlist
+>   with no activity field) nor the Cloud Connector ACL (path match, no method filter)
+>   can tell a read from a write, so the tool surface is one of only two real controls.
+> - **Per-user identity.** On BTP it authenticates callers with XSUAA and reaches BW
+>   through **principal propagation** — every caller hits BW as themselves, subject to
+>   their own ABAP authorizations, not a shared technical user.
+> - **stdio still works** unchanged for local use with `BW_USER`/`BW_PASSWORD`.
+>
+> Deployment, Cloud Connector and ABAP setup: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+>
+> Sections below describing write tools reflect upstream and do not apply here.
+
+**This is not a simulation.** Every tool call connects to a live BW system.
 
 ---
 

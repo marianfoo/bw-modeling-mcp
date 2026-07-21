@@ -1,0 +1,47 @@
+{
+  "xsappname": "bwmcp",
+  "tenant-mode": "dedicated",
+  "description": "Read-only BW/4HANA modeling MCP server",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.read",
+      "description": "Read BW modeling metadata (definitions, dependencies, transports, monitoring)"
+    },
+    {
+      "name": "$XSAPPNAME.data",
+      "description": "Execute BW queries and read the resulting data rows (implies read)"
+    }
+  ],
+  "role-templates": [
+    {
+      "name": "BWModelViewer",
+      "description": "Read BW modeling metadata. Cannot read query data.",
+      "scope-references": ["$XSAPPNAME.read"]
+    },
+    {
+      "name": "BWDataViewer",
+      "description": "Execute BW queries and read data rows.",
+      "scope-references": ["$XSAPPNAME.data"]
+    }
+  ],
+  "role-collections": [
+    {
+      "name": "BW MCP Model Viewer",
+      "description": "Read-only access to BW modeling metadata via MCP",
+      "role-template-references": ["$XSAPPNAME.BWModelViewer"]
+    },
+    {
+      "name": "BW MCP Data Viewer",
+      "description": "Read-only access to BW modeling metadata and query data via MCP",
+      "role-template-references": ["$XSAPPNAME.BWModelViewer", "$XSAPPNAME.BWDataViewer"]
+    }
+  ],
+  "oauth2-configuration": {
+    "redirect-uris": [
+      "https://*.hana.ondemand.com/**",
+      "https://claude.ai/**",
+      "https://claude.com/**",
+      "http://localhost:*/**"
+    ]
+  }
+}
