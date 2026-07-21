@@ -185,6 +185,52 @@ SAP guides: KBA 3361376259 (PP over HTTPS — the main one), 3367280 (401/creden
 popup), 3452851 (step-by-step setup), 3371621 (common ICM parameter mistakes),
 2701137 (Guided Answers).
 
+## Verified against a live system (2026-07-21)
+
+Run against an **ABAP Platform 2025 / SAP_BASIS 816** trial with embedded `SAP_BW`,
+over stdio with basic auth. This exercises the BW protocol layer only — not XSUAA,
+principal propagation or the Cloud Connector.
+
+| Tool | Result |
+|---|---|
+| discovery bootstrap | OK — returned **32** media types, against 14 hardcoded fallbacks |
+| `bw_list_contents` `/` | OK — 6 InfoAreas |
+| `bw_get_infoobject 0CALDAY` | OK |
+| `bw_list_source_systems` | OK |
+| `bw_list_datasources` | OK |
+| `bw_search` | **HTTP 500 — "BW Search is not activated"** |
+| `bw_list_changeable_transports` | **HTTP 404 — no `cto` collection on this system** |
+
+Three things worth knowing before you deploy:
+
+**1. `bw_search` and `bw_xref` need BW Search switched on.** Until then they return
+HTTP 500 `BW Search is not activated`. Activate and index it in transaction **RSOSM**
+(Configure BW Search). This is the same subsystem that buffers `S_RS_*` role changes
+for up to a day, so you will be in RSOSM anyway.
+
+**2. First call per ICF handler is very slow, then fast.** Measured cold vs warm on an
+idle trial system:
+
+| call | cold | warm |
+|---|---|---|
+| `/sap/bw/modeling/discovery` | **71 s** | 0.3–0.8 s |
+| first `bwsearch` | 48 s | — |
+| first `iobj` read | 27 s | — |
+
+This is ICF handler initialisation, not the network. It matters on Cloud Foundry:
+the first tool call after a deploy or an idle period can exceed a client's timeout,
+and each BW endpoint family warms independently. The `/health` endpoint does **not**
+touch BW, so the CF health check is unaffected. If first-call latency is a problem,
+warm the discovery endpoint with a technical user after deploy.
+
+**3. Endpoint availability varies by system.** `cto` (transport listing) is absent
+from this system's discovery document entirely, so `bw_list_changeable_transports`
+404s. Check the collections advertised by `/sap/bw/modeling/discovery` on your target
+before assuming a tool is available.
+
+Reproduce with `node scripts/live-probe.mjs` (reads credentials from an external env
+file; see the script header).
+
 ## Known unknowns
 
 - `/sap/bw/modeling` is an **undocumented internal protocol** — no published contract,
