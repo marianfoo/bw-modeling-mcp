@@ -1,13 +1,9 @@
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import https from 'https';
-import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 
-const ECLIPSE_USER_AGENT =
-  'Eclipse/4.38.0.v20251201-0920 (win32; x86_64; Java 21.0.9) ADT/3.56.0 (devedition)';
-
-// Media types for each BW object type (from BW/4HANA discovery)
-// These hardcoded values serve as fallback defaults; loadMediaTypes() overwrites them at runtime.
+// Media types for each BW object type (from BW/4HANA discovery).
+// Hardcoded fallbacks; loadMediaTypes() overwrites them at runtime.
 export const MEDIA_TYPES: Record<string, string> = {
   adso: 'application/vnd.sap.bw.modeling.adso-v1_7_0+xml',
   iobj: 'application/vnd.sap-bw-modeling.iobj-v2_2_0+xml',
@@ -24,17 +20,6 @@ export const MEDIA_TYPES: Record<string, string> = {
   plse: 'application/vnd.sap.bw.modeling.plse-v2_0_0+xml',
   valuehelp: 'application/vnd.sap-bw-modeling.valuehelp2-v1_1_0+xml',
 };
-
-// DTPs do not need an unlock request after activation
-const NO_UNLOCK_TYPES = new Set(['dtpa']);
-
-function resolveMediaType(type: string): string {
-  const mt = MEDIA_TYPES[type.toLowerCase()];
-  if (!mt) {
-    throw new Error(`Object type '${type}' is not supported on this system (not found in Discovery)`);
-  }
-  return mt;
-}
 
 export interface GetResult {
   body: string;
@@ -208,6 +193,21 @@ export class BwClient {
 
   // ── Public HTTP helpers ────────────────────────────────────────────────────
 
+  /**
+   * Read bypassing the BW server-side model buffer (`forceCacheUpdate=true`),
+   * so an unactivated M draft is returned rather than a stale projection.
+   *
+   * Was a module-level `freshRead()` that called `createClientFromEnv()` — i.e. it
+   * silently minted a second, env-authenticated session mid-request. Under principal
+   * propagation that is an identity downgrade, so it is now a method on the caller's
+   * own client. The "fresh session" half of the original rationale is satisfied by
+   * construction: every PP request already gets its own session.
+   */
+  async freshGet(path: string, accept: string): Promise<GetResult> {
+    const sep = path.includes('?') ? '&' : '?';
+    return this.get(`${path}${sep}forceCacheUpdate=true`, accept);
+  }
+
   async get(path: string, accept: string): Promise<GetResult> {
     await this.ensureCsrf();
     const IOBJ_ACCEPT_ALL = 'application/vnd.sap-bw-modeling.iobj-v1_0_0+xml, application/vnd.sap-bw-modeling.iobj-v1_1_0+xml, application/vnd.sap-bw-modeling.iobj-v1_2_0+xml, application/vnd.sap-bw-modeling.iobj-v1_3_0+xml, application/vnd.sap-bw-modeling.iobj-v1_4_0+xml, application/vnd.sap-bw-modeling.iobj-v1_5_0+xml, application/vnd.sap-bw-modeling.iobj-v1_6_0+xml, application/vnd.sap-bw-modeling.iobj-v1_7_0+xml, application/vnd.sap-bw-modeling.iobj-v1_8_0+xml, application/vnd.sap-bw-modeling.iobj-v1_9_0+xml, application/vnd.sap-bw-modeling.iobj-v2_0_0+xml, application/vnd.sap-bw-modeling.iobj-v2_1_0+xml, application/vnd.sap-bw-modeling.iobj-v2_2_0+xml, application/vnd.sap-bw-modeling.iobj-v2_3_0+xml, application/vnd.sap-bw-modeling.iobj-v2_4_0+xml';
@@ -230,301 +230,6 @@ export class BwClient {
       body: response.data as string,
       headers: response.headers as Record<string, string>,
     };
-  }
-
-  /**
-   * Lock a BW object.
-   * Returns the lockHandle string from the response body.
-   * Pattern: POST /sap/bw/modeling/{type}/{name}?action=lock
-   *
-   * extraHeaders: optional additional headers, e.g. for creation mode:
-   *   { 'activity_context': 'CREA', 'parent_name': 'MYAREA', 'parent_type': 'AREA' }
-   */
-  async lock(type: string, name: string, extraHeaders?: Record<string, string>, sessionType?: string, cleanHeaders?: boolean): Promise<string> {
-    await this.ensureCsrf();
-    const accept = type.toLowerCase() === 'area'
-      ? 'application/vnd.sap.bw.modeling.area-v1_0_0+xml, application/vnd.sap.bw.modeling.area-v1_1_0+xml'
-      : resolveMediaType(type);
-    const headers: Record<string, any> = cleanHeaders
-      ? {
-          Accept: accept,
-          'User-Agent': ECLIPSE_USER_AGENT,
-          'X-sap-adt-profiling': 'server-time',
-          'sap-adt-request-id': randomUUID(),
-          'X-CSRF-Token': this.csrfToken!,
-          ...this.cookieHeaders(),
-          ...extraHeaders,
-          'Content-Type': undefined,
-          'bwmt-level': undefined,
-          'X-sap-adt-sessiontype': undefined,
-          'sap-client': undefined,
-          'sap-language': undefined,
-        }
-      : {
-          Accept: accept,
-          'bwmt-level': '50',
-          'X-CSRF-Token': this.csrfToken!,
-          ...this.cookieHeaders(),
-          ...(sessionType ? { 'X-sap-adt-sessiontype': sessionType } : {}),
-          ...extraHeaders,
-        };
-    const response = await this.http.post(
-      `/sap/bw/modeling/${type.toLowerCase()}/${name.toLowerCase()}?action=lock`,
-      '',
-      {
-        headers,
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    if (response.status >= 400) {
-      throw new Error(`Lock ${type}/${name} → HTTP ${response.status}\n${response.data}`);
-    }
-    const body = response.data as string;
-    // lockHandle is in <LOCK_HANDLE>...</LOCK_HANDLE> in the response body
-    const match = body.match(/<LOCK_HANDLE>([^<]+)<\/LOCK_HANDLE>/);
-    if (!match) {
-      throw new Error(`No <LOCK_HANDLE> in lock response body:\n${body}`);
-    }
-    return match[1];
-  }
-
-  /**
-   * Create a new BW object (POST, no /m in the URL).
-   * Pattern: POST /sap/bw/modeling/{type}/{name}?lockHandle={handle}
-   * Used for object creation from template; the lock must have been obtained
-   * with activity_context=CREA headers.
-   *
-   * extraHeaders: e.g. { 'Development-Class': '$TMP' }
-   */
-  async create(
-    type: string,
-    name: string,
-    lockHandle: string,
-    body: string,
-    extraHeaders?: Record<string, string>
-  ): Promise<string> {
-    await this.ensureCsrf();
-    const mediaType = resolveMediaType(type);
-    const path = `/sap/bw/modeling/${type.toLowerCase()}/${name.toLowerCase()}?lockHandle=${lockHandle}`;
-    const response = await this.http.post(path, body, {
-      headers: {
-        'Content-Type': `application/xml, ${mediaType}`,
-        Accept: mediaType,
-        'X-CSRF-Token': this.csrfToken!,
-        ...this.cookieHeaders(),
-        ...extraHeaders,
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`POST ${path} → HTTP ${response.status}\n${response.data}`);
-    }
-    return response.data as string;
-  }
-
-  /**
-   * PUT (create/update) a BW object in its inactive version.
-   * Pattern: PUT /sap/bw/modeling/{type}/{name}/m?lockHandle={handle}
-   * Always sends the complete object XML.
-   */
-  async put(
-    type: string,
-    name: string,
-    lockHandle: string,
-    body: string,
-    timestamp?: string,
-    corrNr?: string,
-    transportLockHolder?: string
-  ): Promise<string> {
-    await this.ensureCsrf();
-    const mediaType = resolveMediaType(type);
-    const corrNrPrefix = corrNr ? `corrNr=${corrNr}&` : '';
-    const path = `/sap/bw/modeling/${type.toLowerCase()}/${name.toLowerCase()}/m?${corrNrPrefix}lockHandle=${lockHandle}`;
-    const response = await this.http.put(path, body, {
-      headers: {
-        'Content-Type': `application/xml, ${mediaType}`,
-        Accept: mediaType,
-        'X-CSRF-Token': this.csrfToken!,
-        ...this.cookieHeaders(),
-        ...(timestamp ? { timestamp } : {}),
-        ...(transportLockHolder ? { 'Transport-Lock-Holder': transportLockHolder } : {}),
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`PUT ${path} → HTTP ${response.status}\n${response.data}`);
-    }
-    return response.data as string;
-  }
-
-  /**
-   * Lock a BW object for deletion.
-   * Differs from normal lock: URL includes /m before ?action=lock.
-   * Pattern: POST /sap/bw/modeling/{type}/{name}/m?action=lock
-   */
-  async lockForDelete(type: string, name: string, mediaType: string): Promise<string> {
-    await this.ensureCsrf();
-    const response = await this.http.post(
-      `/sap/bw/modeling/${type.toLowerCase()}/${name.toLowerCase()}/m?action=lock`,
-      '',
-      {
-        headers: {
-          Accept: mediaType,
-          'bwmt-level': '50',
-          'X-CSRF-Token': this.csrfToken!,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    if (response.status >= 400) {
-      throw new Error(`Delete-lock ${type}/${name} → HTTP ${response.status}\n${response.data}`);
-    }
-    const body = response.data as string;
-    const match = body.match(/<LOCK_HANDLE>([^<]+)<\/LOCK_HANDLE>/);
-    if (!match) {
-      throw new Error(`No <LOCK_HANDLE> in delete-lock response:\n${body}`);
-    }
-    return match[1];
-  }
-
-  /**
-   * Delete a BW object.
-   * Pattern: DELETE /sap/bw/modeling/{type}/{name}/m?lockHandle={handle}
-   * Lock URL uses /m: POST /sap/bw/modeling/{type}/{name}/m?action=lock
-   */
-  async delete(
-    type: string,
-    name: string,
-    lockHandle: string,
-    mediaType: string
-  ): Promise<string> {
-    await this.ensureCsrf();
-    const path = `/sap/bw/modeling/${type.toLowerCase()}/${name.toLowerCase()}/m?lockHandle=${lockHandle}`;
-    const response = await this.http.delete(path, {
-      headers: {
-        'Content-Type': mediaType,
-        Accept: mediaType,
-        'X-CSRF-Token': this.csrfToken!,
-        ...this.cookieHeaders(),
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`DELETE ${path} → HTTP ${response.status}\n${response.data}`);
-    }
-    return response.data as string;
-  }
-
-  /**
-   * Activate one BW object.
-   * Pattern: POST /sap/bw/modeling/activation
-   * lockHandle is empty string for DTP activation.
-   */
-  async activate(type: string, name: string, lockHandle: string, corrNr?: string, sourceSystem?: string): Promise<string> {
-    await this.ensureCsrf();
-    const mediaType = resolveMediaType(type);
-    const typeLower = type.toLowerCase();
-    // RSDS (DataSource) has a compound key (DataSource + source system) and uses an
-    // uppercase two-segment URI. All other types use the single-segment lowercase URI.
-    const href = typeLower === 'rsds'
-      ? `/sap/bw/modeling/rsds/${name.toUpperCase()}/${(sourceSystem ?? '').toUpperCase()}/m`
-      : `/sap/bw/modeling/${typeLower}/${name.toLowerCase()}/m`;
-    const body = `<?xml version="1.0" encoding="UTF-8"?>
-<atom:feed xmlns:atom="http://www.w3.org/2005/Atom" xmlns:bwModel="http://www.sap.com/bw/modeling">
-  <atom:entry>
-    <atom:content type="${mediaType}">
-      <bwModel:checkProperties version="inactive" modelContent="" lockHandle="${lockHandle}"/>
-    </atom:content>
-    <atom:link href="${href}" type="application/*" rel="self"/>
-  </atom:entry>
-</atom:feed>`;
-    const corrNrParam = corrNr ? `?corrNr=${corrNr}` : '';
-    const response = await this.http.post(`/sap/bw/modeling/activation${corrNrParam}`, body, {
-      headers: {
-        'Content-Type': 'application/atom+xml;type=entry',
-        Accept: 'application/atom+xml;type=feed',
-        'X-CSRF-Token': this.csrfToken!,
-        ...this.cookieHeaders(),
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(
-        `Activation of ${type}/${name} → HTTP ${response.status}\n${response.data}`
-      );
-    }
-    return response.data as string;
-  }
-
-  /**
-   * Generic POST to an arbitrary BW modeling path.
-   * Used for endpoints that don't follow the lock/create/unlock pattern
-   * (e.g. move_requests).
-   */
-  /**
-   * Like postRaw, but skips ensureCsrf() and uses the already-held CSRF token.
-   * Throws if no token is available (caller must have triggered a CSRF fetch beforehand,
-   * e.g. via lock()).
-   */
-  async postWithCsrf(path: string, body: string, contentType: string, extraHeaders?: Record<string, string | undefined>, stripInstanceHeaders?: boolean): Promise<string> {
-    if (!this.csrfToken) {
-      throw new Error('postWithCsrf: no CSRF token available. A prior lock() or get() must have established one.');
-    }
-    const response = await this.http.post(path, Buffer.from(body, 'utf-8'), {
-      headers: {
-        'Content-Type': contentType,
-        Accept: contentType,
-        'X-CSRF-Token': this.csrfToken,
-        ...this.cookieHeaders(),
-        ...extraHeaders,
-        ...(stripInstanceHeaders ? {
-          'User-Agent': ECLIPSE_USER_AGENT,
-          'X-sap-adt-profiling': 'server-time',
-          'sap-adt-request-id': randomUUID(),
-          'bwmt-level': undefined,
-          'X-sap-adt-sessiontype': undefined,
-          'sap-client': undefined,
-          'sap-language': undefined,
-        } : {}),
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`POST ${path} → HTTP ${response.status}\n${response.data}`);
-    }
-    return response.data as string;
-  }
-
-  async postRaw(path: string, body: string, contentType: string, extraHeaders?: Record<string, string>): Promise<string> {
-    await this.ensureCsrf();
-    const response = await this.http.post(path, body, {
-      headers: {
-        'Content-Type': contentType,
-        'X-CSRF-Token': this.csrfToken!,
-        ...this.cookieHeaders(),
-        ...extraHeaders,
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`POST ${path} → HTTP ${response.status}\n${response.data}`);
-    }
-    return response.data as string;
   }
 
   /**
@@ -611,77 +316,6 @@ export class BwClient {
   }
 
   /**
-   * PUT to an arbitrary path with a clean axios instance.
-   * Caller must supply the CSRF token (obtained via getCsrfToken() after any rawGet call).
-   */
-  async rawPut(
-    url: string,
-    body: string,
-    headers: Record<string, string>
-  ): Promise<{ body: string; headers: Record<string, string> }> {
-    const freshHttp = axios.create({
-      baseURL: this.http.defaults.baseURL,
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      validateStatus: () => true,
-      headers: { common: {}, get: {}, post: {}, put: {}, patch: {}, delete: {}, head: {} } as any,
-    });
-
-    const cookieHdr = this.cookieHeader();
-    const response = await freshHttp.put(url, body, {
-      headers: {
-        ...(this.basicAuth ? { Authorization: this.basicAuth } : {}),
-        ...(cookieHdr ? { Cookie: cookieHdr } : {}),
-        ...headers,
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    if (response.status >= 400) {
-      throw new Error(`PUT ${url} → HTTP ${response.status}\n${response.data}`);
-    }
-    return {
-      body: response.data as string,
-      headers: response.headers as Record<string, string>,
-    };
-  }
-
-  /**
-   * DELETE to an arbitrary path with a clean axios instance.
-   * Fetches CSRF token automatically.
-   */
-  async rawDelete(
-    url: string,
-    headers: Record<string, string>
-  ): Promise<{ body: string; headers: Record<string, string> }> {
-    const csrfToken = await this.getCsrfToken();
-    const freshHttp = axios.create({
-      baseURL: this.http.defaults.baseURL,
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      validateStatus: () => true,
-      headers: { common: {}, get: {}, post: {}, put: {}, patch: {}, delete: {}, head: {} } as any,
-    });
-    const cookieHdr = this.cookieHeader();
-    const response = await freshHttp.delete(url, {
-      headers: {
-        ...(this.basicAuth ? { Authorization: this.basicAuth } : {}),
-        ...(cookieHdr ? { Cookie: cookieHdr } : {}),
-        'x-csrf-token': csrfToken,
-        ...headers,
-      },
-      responseType: 'text',
-    });
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`DELETE ${url} → HTTP ${response.status}\n${response.data}`);
-    }
-    return {
-      body: response.data as string,
-      headers: response.headers as Record<string, string>,
-    };
-  }
-
-  /**
    * Fetch the BW modeling discovery document and populate MEDIA_TYPES at runtime.
    * Entries returned by the server overwrite the hardcoded fallback defaults.
    * Entries not returned by the server are left unchanged.
@@ -734,156 +368,6 @@ export class BwClient {
 
   // ── ADT class write flow (ABAP runtime only) ──────────────────────────────
 
-  /** GET the ABAP class source (working area). Returns null if class does not exist yet (404). */
-  async adtGetSource(classEncoded: string): Promise<string | null> {
-    const token = await this.getCsrfToken();
-    const response = await this.http.get(
-      `/sap/bc/adt/oo/classes/${classEncoded}/source/main?version=workingArea`,
-      {
-        headers: {
-          Accept: 'text/plain',
-          'X-CSRF-Token': token,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-        transformResponse: [(data) => data],
-      }
-    );
-    this.updateCookies(response);
-    if (response.status === 404) {
-      return null;
-    }
-    if (response.status >= 400) {
-      throw new Error(`ADT GET source ${classEncoded} → HTTP ${response.status}\n${response.data}`);
-    }
-    return response.data as string;
-  }
-
-  /** Lock the ABAP class for editing. Returns the ADT lock handle. */
-  async adtLockClass(classEncoded: string): Promise<string> {
-    const token = await this.getCsrfToken();
-    const response = await this.http.post(
-      `/sap/bc/adt/oo/classes/${classEncoded}?_action=LOCK&accessMode=MODIFY`,
-      '',
-      {
-        headers: {
-          Accept:
-            'application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result;q=0.8,' +
-            'application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result2;q=0.9',
-          'X-CSRF-Token': token,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    if (response.status >= 400) {
-      throw new Error(`ADT LOCK ${classEncoded} → HTTP ${response.status}\n${response.data}`);
-    }
-    const body = response.data as string;
-    const match = body.match(/<LOCK_HANDLE>([^<]+)<\/LOCK_HANDLE>/);
-    if (!match) {
-      throw new Error(`No <LOCK_HANDLE> in ADT lock response:\n${body}`);
-    }
-    return match[1];
-  }
-
-  /** PUT updated ABAP class source. */
-  async adtPutSource(classEncoded: string, lockHandle: string, source: string): Promise<void> {
-    const token = await this.getCsrfToken();
-    const response = await this.http.put(
-      `/sap/bc/adt/oo/classes/${classEncoded}/source/main?lockHandle=${lockHandle}`,
-      source,
-      {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          Accept: 'text/plain',
-          'X-CSRF-Token': token,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`ADT PUT source ${classEncoded} → HTTP ${response.status}\n${response.data}`);
-    }
-  }
-
-  /** Activate the ABAP class via ADT. */
-  async adtActivate(classEncoded: string, classNameUpper: string): Promise<void> {
-    await this.ensureCsrf();
-    const body =
-      `<?xml version="1.0" encoding="UTF-8"?>` +
-      `<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">` +
-      `<adtcore:objectReference` +
-      ` adtcore:uri="/sap/bc/adt/oo/classes/${classEncoded}"` +
-      ` adtcore:name="${classNameUpper}"/>` +
-      `</adtcore:objectReferences>`;
-    const response = await this.http.post(
-      '/sap/bc/adt/activation?method=activate&preauditRequested=true',
-      body,
-      {
-        headers: {
-          'Content-Type': 'application/xml',
-          Accept: 'application/xml',
-          'X-CSRF-Token': this.csrfToken!,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`ADT activate ${classEncoded} → HTTP ${response.status}\n${response.data}`);
-    }
-  }
-
-  /** Unlock the ABAP class after editing. */
-  async adtUnlockClass(classEncoded: string, lockHandle: string): Promise<void> {
-    await this.ensureCsrf();
-    const response = await this.http.post(
-      `/sap/bc/adt/oo/classes/${classEncoded}?_action=UNLOCK&lockHandle=${lockHandle}`,
-      '',
-      {
-        headers: {
-          'X-CSRF-Token': this.csrfToken!,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`ADT UNLOCK ${classEncoded} → HTTP ${response.status}\n${response.data}`);
-    }
-  }
-
-  async unlock(type: string, name: string): Promise<void> {
-    if (NO_UNLOCK_TYPES.has(type.toLowerCase())) return;
-    await this.ensureCsrf();
-    const mediaType = resolveMediaType(type);
-    const response = await this.http.post(
-      `/sap/bw/modeling/${type.toLowerCase()}/${name.toLowerCase()}?action=unlock`,
-      '',
-      {
-        headers: {
-          'Content-Type': mediaType,
-          'X-CSRF-Token': this.csrfToken!,
-          ...this.cookieHeaders(),
-        },
-        responseType: 'text',
-      }
-    );
-    this.updateCookies(response);
-    this.csrfToken = null;
-    if (response.status >= 400) {
-      throw new Error(`UNLOCK ${type.toUpperCase()} ${name} → HTTP ${response.status}\n${response.data}`);
-    }
-  }
 }
 
 export function createClientFromEnv(): BwClient {
@@ -944,19 +428,3 @@ export function createClientFromEnv(): BwClient {
   return new BwClient(url, user, password, client, language);
 }
 
-/**
- * One-shot read through a BRAND-NEW session with forceCacheUpdate=true.
- *
- * The BW ADT backend keeps a per-session model buffer: a session that has
- * previously locked/written an object reliably serves STALE reads afterwards
- * (even with forceCacheUpdate=true), and pre-lock reads may project outdated
- * state. Building a read-modify-write on such a read silently resurrects old
- * attribute values on the PUT. A fresh session always returns the database
- * state, including an existing unactivated M draft. Use this for every
- * pre-lock model read and for verification reads; post-lock reads in the
- * locking session are refreshed by the lock itself and may stay as they are.
- */
-export async function freshRead(path: string, accept: string): Promise<GetResult> {
-  const sep = path.includes('?') ? '&' : '?';
-  return createClientFromEnv().get(`${path}${sep}forceCacheUpdate=true`, accept);
-}

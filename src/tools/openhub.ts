@@ -62,9 +62,6 @@ function parseOpenHubXml(xml: string, status: string): OpenHubInfo {
   const descMatch = xml.match(/<endUserTexts\b[^>]*\blabel="([^"]*)"/);
   const description = descMatch ? descMatch[1] : '';
 
-  // tlogoProperties
-  const tlMatch = xml.match(/<tlogoProperties([^>]*)>/);
-  const tlAttrs = tlMatch?.[1] ?? '';
   const tlogoPkg = xml.match(/<adtcore:packageRef\b[^>]*\bname="([^"]*)"/)?.[1] ?? '';
   const infoArea = xml.match(/<infoArea[^>]*>([^<]+)<\/infoArea>/)?.[1]?.trim() ?? '';
 

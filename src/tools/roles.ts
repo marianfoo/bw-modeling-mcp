@@ -24,14 +24,6 @@ function xmlDecode(s: string): string {
     .replace(/&apos;/g, "'");
 }
 
-function xmlEscape(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 function parseAttrs(attrStr: string): Record<string, string> {
   const attrs: Record<string, string> = {};
   const re = /(\w+)="([^"]*)"/g;
@@ -143,93 +135,9 @@ function renderTreeNode(node: RoleNode, indent: string, lines: string[]): void {
 
 // ── PUT body builders ─────────────────────────────────────────────────────────
 
-function buildFolderChildXml(node: RoleNode, indent: string): string[] {
-  const lines: string[] = [];
-  if (node.children.length === 0) {
-    lines.push(
-      `${indent}<node nodeid="${node.nodeid}" role="${xmlEscape(node.role)}" ` +
-      `state="unchanged" type="${node.type}" txt="${xmlEscape(node.txt)}"/>`
-    );
-  } else {
-    lines.push(
-      `${indent}<node nodeid="${node.nodeid}" role="${xmlEscape(node.role)}" ` +
-      `state="unchanged" type="${node.type}" txt="${xmlEscape(node.txt)}">`
-    );
-    for (const child of node.children) {
-      lines.push(...buildFolderChildXml(child, indent + '  '));
-    }
-    lines.push(`${indent}</node>`);
-  }
-  return lines;
-}
-
-function buildAddFolderBody(queryName: string, node: RoleNode): string {
-  return [
-    `<?xml version="1.0" encoding="utf-8"?>`,
-    `<tree type="SAP_BW_QUERY" viewType="ancestors" refName="${xmlEscape(queryName)}">`,
-    `  <node nodeid="${node.nodeid}" role="${xmlEscape(node.role)}" state="added" type="FOLDER" txt="${xmlEscape(node.txt)}">`,
-    `  </node>`,
-    `</tree>`,
-  ].join('\n');
-}
-
-function buildAddRoleBody(queryName: string, node: RoleNode): string {
-  const lines: string[] = [
-    `<?xml version="1.0" encoding="utf-8"?>`,
-    `<tree type="SAP_BW_QUERY" viewType="ancestors" refName="${xmlEscape(queryName)}">`,
-    `  <node nodeid="${node.nodeid}" role="${xmlEscape(node.role)}" state="added" type="ROLE" ` +
-      `txt="${xmlEscape(node.txt)}" name="${xmlEscape(node.name)}">`,
-  ];
-  for (const child of node.children) {
-    lines.push(...buildFolderChildXml(child, '    '));
-  }
-  lines.push(`  </node>`);
-  lines.push(`</tree>`);
-  return lines.join('\n');
-}
-
-function buildDeleteBody(queryName: string, node: RoleNode): string {
-  const attribKey = xmlEscape(node.attribKey ?? '');
-  const attribTxt = xmlEscape(node.attribTxt ?? '');
-  const nodeAttrs = node.type === 'ROLE'
-    ? `nodeid="${node.nodeid}" role="${xmlEscape(node.role)}" state="deleted" type="ROLE" ` +
-      `txt="${xmlEscape(node.txt)}" attribKey="${attribKey}" attribTxt="${attribTxt}" name="${xmlEscape(node.name)}"`
-    : `nodeid="${node.nodeid}" role="${xmlEscape(node.role)}" state="deleted" type="FOLDER" ` +
-      `txt="${xmlEscape(node.txt)}" attribKey="${attribKey}" attribTxt="${attribTxt}"`;
-  return [
-    `<?xml version="1.0" encoding="utf-8"?>`,
-    `<tree type="SAP_BW_QUERY" viewType="ancestors" refName="${xmlEscape(queryName)}">`,
-    `  <node ${nodeAttrs}>`,
-    `  </node>`,
-    `</tree>`,
-  ].join('\n');
-}
-
 // ── PUT response parser ───────────────────────────────────────────────────────
 
-function parsePutResponse(xml: string): string {
-  // The response is an atom:feed; the entry-level title/summary carry the actual message.
-  const entryMatch = xml.match(/<atom:entry\b[^>]*>([\s\S]*?)<\/atom:entry>/);
-  const entryXml = entryMatch?.[1] ?? xml;
-  const summary = entryXml.match(/<atom:summary[^>]*>([^<]*)<\/atom:summary>/)?.[1] ?? '';
-  const title = entryXml.match(/<atom:title[^>]*>([^<]*)<\/atom:title>/)?.[1] ?? xml;
-  if (summary.includes('Fehler')) {
-    throw new Error(title);
-  }
-  return title;
-}
-
 // ── Internal fetch helpers ────────────────────────────────────────────────────
-
-async function fetchRolesTree(client: BwClient): Promise<RoleNode[]> {
-  const { body } = await client.rawGet(
-    '/sap/bw/modeling/comp/roles?level=10&requestchk=true&readleaves=false',
-    { Accept: 'application/xml', 'X-sap-adt-sessiontype': 'stateless' }
-  );
-  const treeMatch = body.match(/<tree\b[^>]*>([\s\S]*)<\/tree>/);
-  if (!treeMatch) return [];
-  return parseNodes(treeMatch[1]);
-}
 
 interface QueryAssignment {
   roleName: string;
@@ -474,108 +382,6 @@ export async function bwGetQueryRoles(
   }
 
   return lines.join('\n');
-}
-
-export async function bwSetQueryRoles(
-  client: BwClient,
-  queryName: string,
-  action: 'add' | 'remove',
-  targetName: string,
-  targetType: 'role' | 'folder',
-  parentRoleName?: string
-): Promise<string> {
-  const qName = queryName.toUpperCase();
-  const putUrl = `/sap/bw/modeling/comp/roles?type=SAP_BW_QUERY&ancof=${encodeURIComponent(qName)}`;
-
-  let putBody: string;
-
-  if (action === 'add') {
-    const tree = await fetchRolesTree(client);
-
-    if (targetType === 'role') {
-      function findRole(nodes: RoleNode[]): RoleNode | undefined {
-        for (const n of nodes) {
-          if (n.type === 'ROLE' && n.name === targetName) return n;
-          const found = findRole(n.children);
-          if (found) return found;
-        }
-        return undefined;
-      }
-      const roleNode = findRole(tree);
-      if (!roleNode) throw new Error(`Role "${targetName}" not found in role tree.`);
-      putBody = buildAddRoleBody(qName, roleNode);
-
-    } else {
-      if (!parentRoleName) throw new Error('parent_role_name is required when target_type is "folder".');
-
-      function findParentRole(nodes: RoleNode[]): RoleNode | undefined {
-        for (const n of nodes) {
-          if (n.type === 'ROLE' && n.name === parentRoleName) return n;
-          const found = findParentRole(n.children);
-          if (found) return found;
-        }
-        return undefined;
-      }
-      const parentRole = findParentRole(tree);
-      if (!parentRole) throw new Error(`Role "${parentRoleName}" not found in role tree.`);
-
-      function findFolder(nodes: RoleNode[]): RoleNode | undefined {
-        for (const n of nodes) {
-          if (n.type === 'FOLDER' && n.txt === targetName) return n;
-          const found = findFolder(n.children);
-          if (found) return found;
-        }
-        return undefined;
-      }
-      const folderNode = findFolder(parentRole.children);
-      if (!folderNode) throw new Error(`Folder "${targetName}" not found in role "${parentRoleName}".`);
-      putBody = buildAddFolderBody(qName, folderNode);
-    }
-
-  } else {
-    // action === 'remove'
-    const { assignments } = await fetchQueryAssignments(client, qName);
-    if (assignments.length === 0) throw new Error(`Query "${qName}" is not published in any role.`);
-
-    if (targetType === 'role') {
-      const a = assignments.find(x => x.roleName === targetName);
-      if (!a) throw new Error(`Query "${qName}" is not published in role "${targetName}".`);
-      putBody = buildDeleteBody(qName, {
-        nodeid: a.roleNodeid,
-        role: a.roleRole,
-        name: a.roleName,
-        type: 'ROLE',
-        txt: a.roleTxt,
-        attribKey: a.attribKey,
-        attribTxt: a.attribTxt,
-        children: [],
-      });
-
-    } else {
-      if (!parentRoleName) throw new Error('parent_role_name is required when target_type is "folder".');
-      const a = assignments.find(x => x.roleName === parentRoleName && x.folder?.txt === targetName);
-      if (!a || !a.folder) throw new Error(`Query "${qName}" is not published in folder "${targetName}" of role "${parentRoleName}".`);
-      putBody = buildDeleteBody(qName, {
-        nodeid: a.folder.nodeid,
-        role: a.folder.role,
-        name: '',
-        type: 'FOLDER',
-        txt: a.folder.txt,
-        attribKey: a.attribKey,
-        attribTxt: a.attribTxt,
-        children: [],
-      });
-    }
-  }
-
-  const csrfToken = await client.getCsrfToken();
-  const { body: putResponse } = await client.rawPut(putUrl, putBody, {
-    'Content-Type': 'application/xml',
-    'X-sap-adt-sessiontype': 'stateless',
-    'X-CSRF-Token': csrfToken,
-  });
-
-  return parsePutResponse(putResponse);
 }
 
 export async function bwGetRoleQueries(

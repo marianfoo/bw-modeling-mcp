@@ -1,4 +1,4 @@
-import { BwClient, createClientFromEnv } from '../bw-client.js';
+import { BwClient } from '../bw-client.js';
 
 // Every GET in the runtime manage family returns HTTP 415 unless it carries
 // Content-Type: application/json, even though GET has no body.
@@ -269,45 +269,4 @@ export async function bwGetRequest(
   }
 
   return lines.join('\n');
-}
-
-/**
- * bw_activate_request — activate loaded data (DSO request activation).
- *
- * Moves a finished load from the Inbound Table into the active data table + change log. This is the
- * runtime RSPM request activation under the BW4 manage API ("Aktivieren" in the load-request
- * details) — NOT the modeling-object activation that bw_activate performs (different endpoint).
- *
- * Single POST to .../manage/requests/{tsn}/{storage}/activate with an empty body; the URL is
- * self-contained and the default activates all previous loads up to this request.
- *
- * Runs in a fresh session (createClientFromEnv()) — like the DTP-activation and DTP-run tools —
- * to avoid a stale shared-session buffer and cross-call session/CSRF collisions.
- *
- * Activation is asynchronous: a 200 means it was kicked off, not that it finished. Completion is
- * monitored via bw_list_requests / bw_get_request.
- */
-export async function bwActivateRequest(
-  requestTsn: string,
-  storage: string = 'AQ',
-): Promise<string> {
-  const s = storage.toLowerCase();
-  const url = `/sap/bc/http/sap/bw4/v1/manage/requests/${encodeURIComponent(requestTsn)}/${s}/activate`;
-
-  const runClient = createClientFromEnv();
-  const csrfToken = await runClient.getCsrfToken();
-
-  await runClient.rawPost(url, '', {
-    'Content-Type': 'application/json',
-    'Accept': '*/*',
-    'x-csrf-token': csrfToken,
-  });
-
-  return JSON.stringify({
-    success: true,
-    request_tsn: requestTsn,
-    message:
-      `Data activation started for request ${requestTsn} (storage ${storage.toUpperCase()}). ` +
-      `Activation runs asynchronously; monitor completion via bw_list_requests / bw_get_request.`,
-  });
 }

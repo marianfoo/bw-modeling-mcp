@@ -95,14 +95,6 @@ export async function bwSearch(
   return formatEntries(entries, header);
 }
 
-function padRsdsObjectName(objectName: string): string {
-  const upper = objectName.trim().toUpperCase();
-  if (upper.length >= 40) return upper;
-  const match = upper.match(/^(.*\S)\s+(\S+)$/);
-  if (!match) return upper;
-  return match[1].padEnd(30) + match[2];
-}
-
 /**
  * bw_xref — find where-used / dependencies for any BW object.
  *
