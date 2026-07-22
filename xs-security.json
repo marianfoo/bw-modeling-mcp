@@ -14,34 +14,20 @@
   ],
   "role-templates": [
     {
-      "name": "BWModelViewer",
-      "description": "Read BW modeling metadata. Cannot read query data.",
+      "name": "BWUser",
+      "description": "Use the BW Modeling MCP server: read modeling metadata and execute queries. Read-only.",
       "scope-references": [
-        "$XSAPPNAME.read"
-      ]
-    },
-    {
-      "name": "BWDataViewer",
-      "description": "Execute BW queries and read data rows.",
-      "scope-references": [
+        "$XSAPPNAME.read",
         "$XSAPPNAME.data"
       ]
     }
   ],
   "role-collections": [
     {
-      "name": "BW MCP Model Viewer",
-      "description": "Read-only access to BW modeling metadata via MCP",
-      "role-template-references": [
-        "$XSAPPNAME.BWModelViewer"
-      ]
-    },
-    {
-      "name": "BW MCP Data Viewer",
+      "name": "BW MCP User",
       "description": "Read-only access to BW modeling metadata and query data via MCP",
       "role-template-references": [
-        "$XSAPPNAME.BWModelViewer",
-        "$XSAPPNAME.BWDataViewer"
+        "$XSAPPNAME.BWUser"
       ]
     }
   ],

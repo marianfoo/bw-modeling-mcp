@@ -170,13 +170,25 @@ npm ci && npm run build     # dist/ is what gets pushed; .cfignore excludes src/
 cf push
 ```
 
-Then assign a role collection to your users:
+Then assign the **BW MCP User** role collection to your users — one collection, all 39
+tools:
 
-- **BW MCP Model Viewer** — modeling metadata only (38 tools)
-- **BW MCP Data Viewer** — adds `bw_query_data`, which returns actual BW data rows
+```bash
+btp assign security/role-collection "BW MCP User" --to-user <email> --of-idp <idp>
+```
 
-The `data`/`read` split mirrors ARC-1's `allowDataPreview`: "may inspect the model" and
-"may see the numbers" are different grants.
+Use the IdP the app's OAuth flow actually logs in through (`sap.custom` on a subaccount
+with a custom IAS tenant, not `sap.default`) — the wrong one yields `invalid_scope` at
+token exchange with no other clue.
+
+The server still enforces two scopes internally: `read` for modelling metadata and
+`data` for `bw_query_data`, which returns actual BW rows (`data` implies `read`). The
+shipped collection grants both. If you later want a metadata-only audience, add a second
+collection referencing `$XSAPPNAME.read` alone — no code change; out-of-scope tools
+disappear from `tools/list` rather than failing on call.
+
+Whatever the scopes say, what a caller can actually see in BW is decided by BW against
+their own ABAP user. Scopes gate the door; the SAP role gates the data.
 
 ---
 

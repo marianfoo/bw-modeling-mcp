@@ -1,29 +1,22 @@
 // Drive the built stdio server against a live BW system and report per-tool results.
-//   node scripts/live-probe.mjs            # default smoke set
-//   node scripts/live-probe.mjs bw_search '{"search_term":"Z*"}'
+// Useful for checking which tools a given system actually supports — availability
+// varies with BW Search activation, published OData services, and the discovery doc.
 //
-// Credentials come from arc-1's .env.infrastructure so nothing is written here.
+//   BW_URL=http://bw.example.com:8000 BW_USER=… BW_PASSWORD=… BW_CLIENT=001 \
+//     node scripts/live-probe.mjs
+//   … node scripts/live-probe.mjs bw_get_infoobject '{"infoobject_name":"0CALDAY"}'
+//
+// Reads credentials from the environment only; nothing is stored here.
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 
-const INFRA = '/Users/marianzeis/DEV/arc-1/.env.infrastructure';
-const env = {};
-for (const line of readFileSync(INFRA, 'utf8').split('\n')) {
-  const m = /^(SAP_A4H_2025_[A-Z_]+)=(.*?)\s*(?:#.*)?$/.exec(line);
-  if (m) env[m[1]] = m[2];
+for (const v of ['BW_URL', 'BW_USER', 'BW_PASSWORD']) {
+  if (!process.env[v]) {
+    console.error(`${v} is required. See the header of this file.`);
+    process.exit(1);
+  }
 }
 
-const srv = spawn('node', ['dist/stdio.js'], {
-  env: {
-    ...process.env,
-    BW_URL: env.SAP_A4H_2025_HTTP_URL,
-    BW_USER: env.SAP_A4H_2025_USER,
-    BW_PASSWORD: env.SAP_A4H_2025_PASSWORD,
-    BW_CLIENT: env.SAP_A4H_2025_CLIENT,
-    BW_LANGUAGE: 'EN',
-  },
-  stdio: ['pipe', 'pipe', 'inherit'],
-});
+const srv = spawn('node', ['dist/stdio.js'], { env: process.env, stdio: ['pipe', 'pipe', 'inherit'] });
 
 let nextId = 1;
 const pending = new Map();
@@ -49,16 +42,11 @@ srv.stdout.on('data', (d) => {
 const CASES = process.argv[2]
   ? [[process.argv[2], JSON.parse(process.argv[3] ?? '{}')]]
   : [
+      // A smoke set that needs no prior knowledge of the system's content.
       ['bw_list_contents', { path: '/' }],
-      ['bw_get_infoobject', { infoobject_name: '0CALDAY' }],
-      ['bw_get_infoobject', { infoobject_name: '0CALMONTH' }],
-      ['bw_get_infoarea', { infoarea_name: '0BW' }],
       ['bw_list_source_systems', {}],
-      ['bw_get_source_system', { source_system: 'A4HCLNT001' }],
-      ['bw_list_datasources', { source_system: 'A4HCLNT001' }],
-      ['bw_list_requests', {}],
-      ['bw_list_process_chain_runs', {}],
-      ['bw_list_process_chain_last_status', {}],
+      ['bw_get_infoobject', { infoobject_name: '0CALDAY' }],
+      ['bw_search', { search_term: '*', object_type: 'ADSO' }],
     ];
 
 await send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'live-probe', version: '1' } });

@@ -25,7 +25,7 @@ applications:
       # The URL must be http:// — an https:// destination makes the HTTP client
       # tunnel with CONNECT, which silently drops the principal-propagation headers
       # and returns 405. The Cloud Connector still uses HTTPS to reach BW.
-      BW_BTP_PP_DESTINATION: "ARC1_MULTI_A4H_2025_001_PP"
+      BW_BTP_PP_DESTINATION: "BW4_PP"
       # Only when several Cloud Connectors serve this subaccount.
       # BW_CC_LOCATION_ID: "bw-prod"
       # Public route, if behind a reverse proxy that rewrites Host.
