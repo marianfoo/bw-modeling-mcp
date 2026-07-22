@@ -54,8 +54,24 @@ Two things about this diagram cause most of the lost time:
    gives `InvalidSSOTokenException`.
 6. **Access Control entry**: Protocol **HTTPS**, *Allow Principal Propagation* ✓,
    Principal Type **X.509 Certificate**, *System Certificate for Logon* **off** (SAP's
-   recommendation — lets PP and basic auth share one entry). Allowed paths:
-   `/sap/bw/modeling/`, `/sap/bw4/`, `/sap/bc/http/sap/bw4/`, `/sap/opu/odata/sap/`.
+   recommendation — lets PP and basic auth share one entry).
+7. **Expose the resources** on that mapping — *Resources Accessible On …* → add each
+   with **Path and all sub-paths**:
+
+   | Path | Needed for |
+   |---|---|
+   | `/sap/bw/modeling` | everything — the primary modeling service |
+   | `/sap/bw4` | BW/4 v1 REST |
+   | `/sap/bc/http/sap/bw4` | BW/4 v1 REST via the ICF handler node |
+   | `/sap/opu/odata/sap` | process-chain monitoring |
+
+   **This is a separate step from the system mapping and is easy to miss.** A system
+   mapping with no matching resource returns HTTP 403 with the body
+   `Access denied to resource … ensure to expose the resource correctly in your cloud
+   connector` — a Cloud Connector message, not a BW one, and it looks nothing like an
+   authorization failure. An existing mapping created for ADT typically exposes only
+   `/sap/bc/adt`, so BW paths must be added even when ADT already works through the
+   same host.
 
 Note the asymmetry: the **CC→BW leg is HTTPS**, the **app→CC leg is plain HTTP**. Both
 are correct at once.

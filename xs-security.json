@@ -16,24 +16,33 @@
     {
       "name": "BWModelViewer",
       "description": "Read BW modeling metadata. Cannot read query data.",
-      "scope-references": ["$XSAPPNAME.read"]
+      "scope-references": [
+        "$XSAPPNAME.read"
+      ]
     },
     {
       "name": "BWDataViewer",
       "description": "Execute BW queries and read data rows.",
-      "scope-references": ["$XSAPPNAME.data"]
+      "scope-references": [
+        "$XSAPPNAME.data"
+      ]
     }
   ],
   "role-collections": [
     {
       "name": "BW MCP Model Viewer",
       "description": "Read-only access to BW modeling metadata via MCP",
-      "role-template-references": ["$XSAPPNAME.BWModelViewer"]
+      "role-template-references": [
+        "$XSAPPNAME.BWModelViewer"
+      ]
     },
     {
       "name": "BW MCP Data Viewer",
       "description": "Read-only access to BW modeling metadata and query data via MCP",
-      "role-template-references": ["$XSAPPNAME.BWModelViewer", "$XSAPPNAME.BWDataViewer"]
+      "role-template-references": [
+        "$XSAPPNAME.BWModelViewer",
+        "$XSAPPNAME.BWDataViewer"
+      ]
     }
   ],
   "oauth2-configuration": {
@@ -41,7 +50,12 @@
       "https://*.hana.ondemand.com/**",
       "https://claude.ai/**",
       "https://claude.com/**",
-      "http://localhost:*/**"
-    ]
+      "https://*.anthropic.com/**",
+      "http://localhost:*/**",
+      "vscode://**",
+      "cursor://**"
+    ],
+    "token-validity": 43200,
+    "refresh-token-validity": 604800
   }
 }
