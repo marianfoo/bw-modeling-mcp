@@ -1,6 +1,8 @@
 import { BwClient, MEDIA_TYPES } from '../bw-client.js';
 
-const TRFN_ACCEPT = MEDIA_TYPES['trfn'];
+// Read at call time — see the note in adso.ts. A module-load snapshot captures the
+// hardcoded fallback before discovery has run.
+const trfnAccept = () => MEDIA_TYPES['trfn'];
 
 /**
  * Read the inactive (/m) version of a Transformation through a FRESH session
@@ -18,7 +20,7 @@ async function freshReadInactive(
   client: BwClient,
   trfnLower: string
 ): Promise<{ body: string; headers: Record<string, string> }> {
-  return client.freshGet(`/sap/bw/modeling/trfn/${trfnLower}/m`, TRFN_ACCEPT);
+  return client.freshGet(`/sap/bw/modeling/trfn/${trfnLower}/m`, trfnAccept());
 }
 
 // ── bwCreateTransformation ────────────────────────────────────────────────────

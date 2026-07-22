@@ -409,11 +409,18 @@ export class BwClient {
         .filter((mt) => extractVersion(mt) > 0);
       if (versioned.length === 0) continue;
       const best = versioned.reduce((a, b) => (extractVersion(b) >= extractVersion(a) ? b : a));
-      const existing = MEDIA_TYPES[key];
-      // Only update if the discovered version is >= the existing one (never downgrade).
-      if (!existing || extractVersion(best) >= extractVersion(existing)) {
-        MEDIA_TYPES[key] = best;
-      }
+      // Discovery always wins over the hardcoded fallback, including downgrades.
+      //
+      // The fallbacks are a guess for when discovery is unreachable; the discovery
+      // document is this system's authoritative statement of what it accepts. A
+      // "never downgrade" rule kept the seeded adso-v1_7_0 on a system advertising
+      // adso-v1_2_0, and BW answered every aDSO read with
+      //   HTTP 415 "Requested content type ... does not match back-end content type"
+      // Live-verified on ABAP Platform 2025 / SAP_BASIS 816.
+      //
+      // Picking the highest version still applies *within* one collection's accepts,
+      // which is what `best` above does.
+      MEDIA_TYPES[key] = best;
     }
     process.stderr.write(`[bw-modeling-mcp] Loaded media types from discovery: ${JSON.stringify(MEDIA_TYPES)}\n`);
   }

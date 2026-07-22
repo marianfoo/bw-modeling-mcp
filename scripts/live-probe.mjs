@@ -50,12 +50,15 @@ const CASES = process.argv[2]
   ? [[process.argv[2], JSON.parse(process.argv[3] ?? '{}')]]
   : [
       ['bw_list_contents', { path: '/' }],
-      ['bw_list_contents', { path: 'area/nodesnotconnected' }],
       ['bw_get_infoobject', { infoobject_name: '0CALDAY' }],
+      ['bw_get_infoobject', { infoobject_name: '0CALMONTH' }],
+      ['bw_get_infoarea', { infoarea_name: '0BW' }],
       ['bw_list_source_systems', {}],
+      ['bw_get_source_system', { source_system: 'A4HCLNT001' }],
       ['bw_list_datasources', { source_system: 'A4HCLNT001' }],
-      ['bw_search', { search_term: '*', object_type: 'ADSO' }],
-      ['bw_list_changeable_transports', {}],
+      ['bw_list_requests', {}],
+      ['bw_list_process_chain_runs', {}],
+      ['bw_list_process_chain_last_status', {}],
     ];
 
 await send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'live-probe', version: '1' } });
@@ -72,7 +75,7 @@ for (const [name, args] of CASES) {
   const bad = res.result?.isError || res.error;
   const label = `${name} ${JSON.stringify(args)}`;
   console.log(`${bad ? 'FAIL' : ' OK '} ${String(ms).padStart(6)}ms  ${label}`);
-  console.log(`        ${c.slice(0, 300).replace(/\n/g, '\n        ')}\n`);
+  console.log(`        ${c.slice(0, 4000).replace(/\n/g, '\n        ')}\n`);
 }
 
 srv.kill();

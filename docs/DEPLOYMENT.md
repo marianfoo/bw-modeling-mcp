@@ -247,6 +247,56 @@ before assuming a tool is available.
 Reproduce with `node scripts/live-probe.mjs` (reads credentials from an external env
 file; see the script header).
 
+## Live on Cloud Foundry with principal propagation (2026-07-22)
+
+Deployed to CF (us10-001) against an **ABAP Platform 2025 / SAP_BASIS 816** trial with
+embedded `SAP_BW`, reached through a `PrincipalPropagation` destination and the Cloud
+Connector. **The full chain is proven**: MCP client → XSUAA → Destination service →
+connectivity proxy → Cloud Connector → BW, with the caller's own identity. The server
+log line `Loaded media types from discovery: {...32 types...}` is a real BW response
+fetched under a per-user certificate.
+
+### What works on this system
+
+| Tool | Example arguments |
+|---|---|
+| `bw_list_contents` | `{"path": "/"}` — root only, see below |
+| `bw_get_infoobject` | `{"infoobject_name": "0CALDAY"}` |
+| `bw_get_infoarea` | `{"name": "0BW"}` |
+| `bw_list_source_systems` | `{}` |
+| `bw_get_source_system` | `{"source_system": "A4HCLNT001"}` |
+| `bw_list_datasources` | `{"source_system": "A4HCLNT001"}` |
+
+### What is blocked, and by what
+
+| Blocked | Cause | Fix |
+|---|---|---|
+| `bw_search`, `bw_xref`, and `bw_list_contents` for **sub**-areas | HTTP 500 `BW Search is not activated` (`RSOS_SEARCH 113`) | activate + index BW Search in **RSOSM** |
+| `bw_list_process_chain_runs`, `..._last_status`, `bw_get_process_chain_run_detail` | HTTP 403 `No service found for ... RV_C_PCMLOG_CDS` | publish the OData services in `/IWFND/MAINT_SERVICE` |
+| `bw_list_changeable_transports` | no `cto` collection in this system's discovery | none — endpoint absent |
+| `bw_get_adso`, `bw_get_dataflow` on BI-Content objects | HTTP 404 `Version 'M' of DataStore object ... does not exist` | see below |
+
+The last one is a design characteristic rather than a configuration gap: these tools
+read the **inactive (`/m`) draft**, and BI-Content objects delivered active-only have no
+M version. On a system whose content is all active, they cannot return anything. Making
+them fall back to `/a` would change what the tool returns (active instead of draft), so
+it is deliberately left alone rather than changed silently.
+
+### Two bugs this found
+
+Both were invisible until a real system answered, and both are inherited from upstream:
+
+1. **Module-load snapshots of `MEDIA_TYPES`.** `const ADSO_ACCEPT = MEDIA_TYPES['adso']`
+   evaluates at import time — before `loadMediaTypes()` has run — so the hardcoded
+   fallback is captured permanently. On a system advertising `adso-v1_2_0` the client
+   kept asking for the seeded `v1_7_0` and BW answered
+   `HTTP 415 Requested content type ... does not match back-end content type`. Fixed in
+   `adso.ts` and `transformation.ts` by reading at call time.
+2. **Discovery could not downgrade a media type.** The parser only accepted a discovered
+   version `>=` the seeded one ("never downgrade"), so an older backend could never
+   correct the fallback. Discovery is the system's authoritative statement of what it
+   accepts and now always wins.
+
 ## Known unknowns
 
 - `/sap/bw/modeling` is an **undocumented internal protocol** — no published contract,

@@ -2,7 +2,11 @@ import { BwClient, MEDIA_TYPES } from '../bw-client.js';
 
 // ── aDSO type presets ────────────────────────────────────────────────────────
 
-const ADSO_ACCEPT = MEDIA_TYPES['adso'];
+// Read at call time, not module load. `const X = MEDIA_TYPES['adso']` snapshots the
+// hardcoded fallback before loadMediaTypes() has run, so a system advertising an older
+// version (e.g. adso-v1_2_0 on ABAP Platform 2025) still got asked for the seeded
+// v1_7_0 and answered HTTP 415 "does not match back-end content type".
+const adsoAccept = () => MEDIA_TYPES['adso'];
 
 /**
  * bw_get_adso — read aDSO structure (inactive version).
@@ -14,7 +18,7 @@ export async function bwGetAdso(
   format: 'text' | 'raw' = 'text',
 ): Promise<string> {
   const path = `/sap/bw/modeling/adso/${adsoName.toLowerCase()}/m`;
-  const result = await client.freshGet(path, ADSO_ACCEPT);
+  const result = await client.freshGet(path, adsoAccept());
   const status = result.headers['object_status'] ?? result.headers['OBJECT_STATUS'] ?? 'unknown';
   const ts = result.headers['timestamp'] ?? '';
   const rawOutput = `aDSO: ${adsoName.toUpperCase()}\nStatus: ${status}\nTimestamp: ${ts}\n\n${result.body}`;
