@@ -14,7 +14,7 @@ import express from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { setupHttpAuth, loadXsuaaCredentials, resolveAppUrl } from '@arc-mcp/xsuaa-auth';
 import { createConnectivityProxy, parseVCAPServices } from '@arc-mcp/xsuaa-auth/btp';
-import { server } from './index.js';
+import { createServer } from './index.js';
 import { runWithClient } from './request-context.js';
 import { createPerUserClient, userLabel, type PpDeps } from './pp-client.js';
 
@@ -109,10 +109,17 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Stateless: a new transport per request. Under PP identity is re-established
-    // every call, so there is no session worth keeping between them.
+    // Stateless: a fresh Server AND transport per request. The SDK binds a Server to
+    // one transport for its lifetime, so a shared instance throws "Already connected
+    // to a transport" on the second call. Per-request instances also mean no protocol
+    // state can leak between two users sharing this process — which is the point when
+    // each request carries a different SAP identity.
+    const server = createServer();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on('close', () => void transport.close());
+    res.on('close', () => {
+      void transport.close();
+      void server.close();
+    });
     await runWithClient(client, async () => {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
