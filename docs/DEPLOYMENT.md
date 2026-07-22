@@ -1,327 +1,194 @@
-# Deploying to SAP BTP Cloud Foundry with principal propagation
+# BW Modeling MCP — deployment guide
 
-Read-only, per-user BW access: every MCP caller reaches BW as *themselves*, not as a
-shared technical user.
+A read-only MCP server that lets an AI assistant explore SAP BW/4HANA modeling
+metadata. Runs on SAP BTP Cloud Foundry. Every user reaches BW **as themselves** via
+principal propagation, so BW's own authorizations apply per person — no shared
+technical user.
 
-**Start the SAP-side track first.** The Cloud Connector and ABAP steps below are the
-long pole — they involve certificates, profile parameters and a role that SAP does
-not ship. The `cf push` is the easy part.
+**Read-only is structural, not a setting.** The write tools are not in the build; there
+is no flag that turns writing back on. This matters because neither `S_ADT_RES` (a URI
+allowlist with no activity field) nor the Cloud Connector ACL (path matching, no HTTP
+method filter) can tell a read from a write — so the tool surface and the BW role are
+the only two real controls.
+
+**Plan for the SAP-side work, not the deployment.** The `cf push` takes minutes. The
+Cloud Connector certificates, the ABAP profile parameters and the BW role take days and
+usually involve two teams. Start there.
 
 ---
 
-## How the identity actually travels
+## 1. Prerequisites
+
+| | What | Who |
+|---|---|---|
+| ☐ | BTP subaccount with Cloud Foundry, entitled for **XSUAA**, **Destination**, **Connectivity** | BTP admin |
+| ☐ | Cloud Connector connected to the subaccount, reaching the BW system | Basis |
+| ☐ | Principal propagation configured end to end (§2) | Basis |
+| ☐ | A display-only BW role (§3) | SAP security |
+| ☐ | `/sap/bw/modeling` active in **SICF** | Basis |
+| ☐ | BW Search activated in **RSOSM** — otherwise search and area browsing return HTTP 500 | Basis |
+
+## 2. Principal propagation
 
 ```
 MCP client --XSUAA JWT--> this app --X-User-Token--> Destination service
-                                |
-                                | SAP-Connectivity-Authentication
-                                v
-                        Connectivity proxy --> Cloud Connector
-                                |
-                                | short-lived X.509 in SSL_CLIENT_CERT
-                                v
-                        BW/4HANA  --CERTRULE--> ABAP user
+   --SAP-Connectivity-Authentication--> Cloud Connector
+   --short-lived X.509 in SSL_CLIENT_CERT--> BW  --CERTRULE--> ABAP user
 ```
 
-Two things about this diagram cause most of the lost time:
+**Cloud Connector**
 
-1. **Two different certificates.** The Cloud Connector's *system certificate*
-   establishes mTLS with BW. A separate *CA certificate* signs the short-lived
-   per-user certificates. Configuring only the system certificate gives
-   `IllegalStateException: No CA certificate available` — the classic first failure.
-2. **Two different tokens on the wire.** `SAP-Connectivity-Authentication` carries the
-   user; `Proxy-Authorization` authenticates this app to the connectivity proxy.
-   `Authorization` is never sent — SAP reserves it for basic auth to the backend, and
-   sending it breaks propagation.
+1. **System certificate** — the CC's own TLS identity. Self-signed ones must have **no**
+   Subject Alternative Names.
+2. **CA certificate** — signs the short-lived per-user certificates; needs the
+   `keyCertSign` key usage. *A separate certificate from the system one — configuring
+   only the latter gives `IllegalStateException: No CA certificate available`.*
+3. **Principal Propagation** → subject pattern, e.g. `CN=${login_name}`. Set *Certificate
+   Validity (min)* low. Click **Generate Sample Certificate** — CERTRULE needs that file.
+4. **Backend Trust Store** → add the CA of BW's server certificate.
+5. **Cloud to On-Premises → Principal Propagation → Synchronize**, and mark your IdP
+   **Trusted**. This list is empty by default.
+6. **Access control entry**: Protocol **HTTPS**, *Allow Principal Propagation* ✓,
+   Principal Type **X.509 Certificate**, *System Certificate for Logon* **off**.
+7. **Expose the resources** — separate from the system mapping, and the most commonly
+   missed step. Add each with *Path and all sub-paths*: `/sap/bw/modeling`, `/sap/bw4`,
+   `/sap/bc/http/sap/bw4`, `/sap/opu/odata/sap`. A mapping created earlier for ADT
+   exposes only `/sap/bc/adt`.
 
----
+**ABAP**
 
-## 1. Cloud Connector
-
-1. **System Certificate** — import or generate. A self-signed one must have **no
-   Subject Alternative Names** (CC ≥ 2.16.1 refuses to create them; regenerate older ones).
-2. **CA Certificate** — PKCS#12, CSR, or self-signed. Must carry the `keyCertSign` key
-   usage, or backends reject the client certificates it issues.
-3. **Principal Propagation** — set a subject pattern, e.g. `CN=${login_name}`. Set
-   *Certificate Validity (min)* deliberately low; the range is 0–43200 (30 days) and
-   the CC caches and reuses certificates within it, so "short-lived" is a choice, not
-   a guarantee. Then **Generate Sample Certificate** — that DER file is the input to
-   CERTRULE in step 11.
-4. **Backend Trust Store** — add the CA of BW's own server certificate, or the CC→BW
-   handshake fails with `SunCertPathBuilderException`.
-5. **Cloud to On-Premises → Principal Propagation tab → Synchronize**, and mark the
-   issuing IdP **Trusted**. The trusted-IdP list is **empty by default**; skipping this
-   gives `InvalidSSOTokenException`.
-6. **Access Control entry**: Protocol **HTTPS**, *Allow Principal Propagation* ✓,
-   Principal Type **X.509 Certificate**, *System Certificate for Logon* **off** (SAP's
-   recommendation — lets PP and basic auth share one entry).
-7. **Expose the resources** on that mapping — *Resources Accessible On …* → add each
-   with **Path and all sub-paths**:
-
-   | Path | Needed for |
-   |---|---|
-   | `/sap/bw/modeling` | everything — the primary modeling service |
-   | `/sap/bw4` | BW/4 v1 REST |
-   | `/sap/bc/http/sap/bw4` | BW/4 v1 REST via the ICF handler node |
-   | `/sap/opu/odata/sap` | process-chain monitoring |
-
-   **This is a separate step from the system mapping and is easy to miss.** A system
-   mapping with no matching resource returns HTTP 403 with the body
-   `Access denied to resource … ensure to expose the resource correctly in your cloud
-   connector` — a Cloud Connector message, not a BW one, and it looks nothing like an
-   authorization failure. An existing mapping created for ADT typically exposes only
-   `/sap/bc/adt`, so BW paths must be added even when ADT already works through the
-   same host.
-
-Note the asymmetry: the **CC→BW leg is HTTPS**, the **app→CC leg is plain HTTP**. Both
-are correct at once.
-
-## 2. ABAP (BW/4HANA)
-
-7. **STRUST** → SSL server Standard → import the **issuer** of the CC system
-   certificate (the CA, not the system certificate itself unless self-signed) → *Add to
-   Certificate List*. Full chain.
-8. **`icm/trusted_reverse_proxy_<x> = SUBJECT="<subj>", ISSUER="<iss>"`**
-   - `icm/HTTPS/trust_client_with_issuer` / `..._with_subject` are the **kernel ≤ 7.42**
-     legacy pair.
-   - **Setting both variants means BOTH are ignored** (SAP Note 2052899) — a silent,
-     total loss of trust. This is widely misreported as "the new one wins". It does not.
-   - `SUBJECT`/`ISSUER` must be **uppercase**; below kernel 7.53 the DN needs **blanks
-     after commas** even though the CC UI shows none (Note 3335949, KBA 3371621).
-   - It is a vector parameter — not editable via RZ11/SMICM before SAP_BASIS 816.
-9. **`icm/HTTPS/verify_client`** = 1 (default). The per-port `VCLIENT=` on
-   `icm/server_port_<n>` **overrides** it; `VCLIENT=0` breaks PP whatever the global says.
-10. **`login/certificate_mapping_rulebased = 1`** — but migrate any existing USREXTID
-    entries with **`CERTRULE_MIG` first**. SAP is explicit that migration precedes the flip.
-11. **CERTRULE** — import the sample certificate from step 3, create the rule.
-    **CERTRULE is client-dependent**: maintain it in the right client or it never
-    matches. Map to **Alias** or **E-Mail**, never **User Name** — ABAP user names are
-    12 characters and BTP identities are email addresses.
-12. **SICF** — `/sap/bw/modeling`, `/sap/bw4/*` must permit *Logon Through SSL Certificate*.
-13. **CRCONFIG** — CRL **strict mode** in profile `SSL_SERVER` is incompatible with
-    X.509 identity propagation.
+8. **STRUST** → SSL server Standard → import the **issuer** of the CC system certificate
+   → *Add to Certificate List*.
+9. `icm/trusted_reverse_proxy_<x> = SUBJECT="<subj>", ISSUER="<iss>"`
+   - Uppercase keywords. Below kernel 7.53, put a blank after each comma in the DN even
+     though the CC UI shows none.
+   - `icm/HTTPS/trust_client_with_issuer` / `..._with_subject` are the kernel ≤ 7.42
+     legacy pair. **Setting both variants means both are ignored** (SAP Note 2052899) —
+     a silent, total loss of trust, widely misreported as "the new one wins".
+10. `icm/HTTPS/verify_client = 1`. The per-port `VCLIENT=` on `icm/server_port_<n>`
+    overrides it; `VCLIENT=0` breaks propagation whatever the global says.
+11. `login/certificate_mapping_rulebased = 1` — after migrating any existing USREXTID
+    entries with `CERTRULE_MIG`.
+12. **CERTRULE** → import the sample certificate from step 3, create the rule.
+    **It is client-dependent** — maintain it in the right client. Map to **Alias** or
+    **E-Mail**, never **User Name**: ABAP user names are 12 characters, BTP identities
+    are email addresses.
+13. **SICF** → the BW paths must allow *Logon Through SSL Certificate*.
 14. **SMICM** → Administration → ICM → Exit Hard → Global.
 
-SNC is **not** involved. SNC is the RFC propagation mechanism; the HTTPS path is
-mTLS/X.509 only. Guidance telling you to set the SU01 **SNC tab** for HTTPS PP is
-conflating the two.
+SNC is **not** involved — that is the RFC propagation path, not HTTPS.
 
-## 3. The BW role — you have to build it
+## 3. The BW role
 
-**SAP ships no display-only BW modeling role.** The `SAP_BW4_*` set has six roles and
-every one grants change or reporting. Build from `S_RS_RDEMO` (modeler template,
-stripped to display) or `S_RS_RDEBO` ("read authorizations for BW metadata objects"),
-plus `SAP_BC_DWB_WBDISPLAY`. **Copy into `Z_*` first** — SAP overwrites `SAP_*` roles on
-upgrade.
+**SAP ships no display-only BW modeling role**, so one has to be built. Start from
+`S_RS_RDEMO` (modeler template, stripped to display) or `S_RS_RDEBO` ("read
+authorizations for BW metadata objects"), plus `SAP_BC_DWB_WBDISPLAY`. **Copy into `Z_*`
+first** — SAP overwrites `SAP_*` roles on upgrade.
 
 **BW read is ACTVT 03; write is ACTVT 23, not 02.** A role built by withholding `02`
-still writes. Most `S_RS_*` objects also carry a `…PART` subobject field separating
-*definition* from *data* — for a metadata-only server grant `PART=definition` +
-`ACTVT=03`. Note that the user needs at least `Definition` just to *see* an object in
-the tree.
-
-Authorization surface (SAP Note 1969032):
+still writes. Most `S_RS_*` objects also carry a `…PART` field separating *definition*
+from *data*: grant `PART=definition` + `ACTVT=03` for metadata-only. The user needs at
+least `Definition` merely to *see* an object in the tree.
 
 | Object | Value |
 |---|---|
-| `S_ADT_RES` | `/sap/bw/modeling/*` (start here; widen to `/sap/bc/*` only if a call 403s) |
+| `S_ADT_RES` | `/sap/bw/modeling/*` (widen to `/sap/bc/*` only if a call 403s) |
 | `S_BW4_REST` | `/sap/bw4/*` |
-| `S_SERVICE` | the process-chain-monitoring OData services |
 | `S_RFC` | ACTVT 16 on `SADT_REST_RFC_ENDPOINT`, `DDIF_FIELDINFO_GET`, `RFCPING`, `RFC_GET_FUNCTION_INTERFACE` |
 | `S_TCODE` | `SADT_START_TCODE`, `SADT_START_WB_URI` |
 | per-TLOGO | `S_RS_ADSO`, `S_RS_IOBJA`, `S_RS_DTP`, `S_RS_PC`, `S_RS_TRCS`, `S_RS_DS`, `S_RS_CPRO`, `S_RS_HCPR`, `S_RS_ODSV` at ACTVT 03 |
 
 **Never grant `S_RS_ALL`** — it is a *profile*, effectively SAP_ALL for BW.
 
-`S_DEVELOP` is very likely **not** needed: every `/sap/bc/adt/**` call was on a write
-path and is gone from this build. Confirm with ST01/STAUTHTRACE rather than assuming.
-
 > After any role change run **RSOSM → Configure BW Search → Refresh**. `S_RS_*` changes
-> are buffered by BW Search for up to a day, and the symptom — objects invisible in the
-> tree — looks exactly like a missing authorization. Two community threads diagnosed as
-> authorization bugs were this.
+> are buffered for up to a day, and the symptom — objects missing from the tree — looks
+> exactly like a missing authorization.
 
-## 4. BTP
-
-Destination `BW4_PP`:
+## 4. BTP destination
 
 | Property | Value |
 |---|---|
 | `Type` | `HTTP` |
-| `URL` | `http://<cc-virtual-host>:<port>` — **must be `http://`** |
+| `URL` | `http://<cc-virtual-host>:<port>` — **`http://`, see below** |
 | `ProxyType` | `OnPremise` |
 | `Authentication` | `PrincipalPropagation` |
-| `CloudConnectorLocationId` | only if several CCs serve the subaccount |
+| `CloudConnectorLocationId` | only if several Cloud Connectors serve the subaccount |
 
-Do **not** set `User`/`Password`. `sap-client` is not a documented destination property
-for PrincipalPropagation — it is `BW_CLIENT` in `manifest.yml` and is sent as a header.
+Do **not** set `User`/`Password`.
 
-> **The `https://` trap.** An `https://` destination makes the HTTP client tunnel with
-> `CONNECT`, which drops *both* PP headers before the proxy sees them, and the Cloud
-> Connector answers 405. Nothing in the error mentions identity. `createPerUserClient`
-> rejects this at startup of the request rather than letting you debug the 405.
+> **The `https://` trap.** SAP: *"the call from the cloud application must always use
+> HTTP. If HTTPS is used, a 405 response will be returned."* An `https://` destination
+> also makes the HTTP client tunnel with `CONNECT`, which silently drops the propagation
+> headers before the proxy sees them — so the 405 says nothing about identity. The Cloud
+> Connector still uses HTTPS to reach BW. The server rejects this configuration at
+> request time rather than letting you debug the 405.
+
+## 5. Deploy
 
 ```bash
-cf create-service xsuaa application bwmcp-xsuaa -c xs-security.json
-cf create-service destination  lite bwmcp-destination
-cf create-service connectivity lite bwmcp-connectivity
+cf create-service xsuaa        application bwmcp-xsuaa -c xs-security.json
+cf create-service destination  lite        bwmcp-destination
+cf create-service connectivity lite        bwmcp-connectivity
 
-npm ci && npm run build     # dist/ is what gets pushed; .cfignore excludes src/
-cf push
+npm ci && npm run build          # dist/ is what ships; .cfignore excludes src/
+cf push                          # edit manifest.yml first: BW_BTP_PP_DESTINATION, BW_CLIENT
 ```
 
-Then assign the **BW MCP User** role collection to your users — one collection, all 39
-tools:
+`manifest.yml` ships placeholders. Note that values there **override** anything set with
+`cf set-env` on the next push, so keep the manifest authoritative rather than patching
+the deployed app.
+
+Then assign the **BW MCP User** role collection — one collection, all 40 tools:
 
 ```bash
 btp assign security/role-collection "BW MCP User" --to-user <email> --of-idp <idp>
 ```
 
-Use the IdP the app's OAuth flow actually logs in through (`sap.custom` on a subaccount
-with a custom IAS tenant, not `sap.default`) — the wrong one yields `invalid_scope` at
-token exchange with no other clue.
+Use the IdP the app actually logs in through (`sap.custom` on a subaccount with a custom
+IAS tenant, **not** `sap.default`) — the wrong one gives `invalid_scope` with no other clue.
 
-The server still enforces two scopes internally: `read` for modelling metadata and
-`data` for `bw_query_data`, which returns actual BW rows (`data` implies `read`). The
-shipped collection grants both. If you later want a metadata-only audience, add a second
-collection referencing `$XSAPPNAME.read` alone — no code change; out-of-scope tools
-disappear from `tools/list` rather than failing on call.
-
-Whatever the scopes say, what a caller can actually see in BW is decided by BW against
-their own ABAP user. Scopes gate the door; the SAP role gates the data.
-
----
-
-## When it does not work
-
-The overwhelmingly most common symptom is **401 with a basic-auth popup**. In the ICM
-trace:
+## 6. Connect a client
 
 ```
-HttpModIsReverseProxyTrustworthy: no trust relationship to intermediary specified
-intermediary is NOT trusted -> remove SSL header fields
+https://<app-route>/mcp
 ```
 
-The ICM stripped `SSL_CLIENT_CERT`. Cause is almost always step 8 — parameter missing,
-mistyped, lowercase keyword, wrong spacing, or both variants set at once. Healthy looks
-like `intermediary is trusted -> forward SSL header fields`.
+OAuth is fully discoverable — a client needs only that URL. It finds the authorization
+server, registers itself dynamically, and sends the user through the normal browser login.
 
-Traces: SMICM → Goto → Trace → Level 2; CC loggers to All/Debug (`ljs_trace.log` /
-`scc_core.trc`); SM50 → Taskhandler + Security + ICF at level 2.
+**Expect the first call to be slow.** BW initializes each ICF handler on first use:
+around 70 s for discovery on an idle system, then sub-second. Each endpoint family warms
+independently. `/health` does not touch BW, so the CF health check is unaffected.
 
-SAP guides: KBA 3361376259 (PP over HTTPS — the main one), 3367280 (401/credential
-popup), 3452851 (step-by-step setup), 3371621 (common ICM parameter mistakes),
-2701137 (Guided Answers).
+## 7. When it does not work
 
-## Verified against a live system (2026-07-21)
-
-Run against an **ABAP Platform 2025 / SAP_BASIS 816** trial with embedded `SAP_BW`,
-over stdio with basic auth. This exercises the BW protocol layer only — not XSUAA,
-principal propagation or the Cloud Connector.
-
-| Tool | Result |
-|---|---|
-| discovery bootstrap | OK — returned **32** media types, against 14 hardcoded fallbacks |
-| `bw_list_contents` `/` | OK — 6 InfoAreas |
-| `bw_get_infoobject 0CALDAY` | OK |
-| `bw_list_source_systems` | OK |
-| `bw_list_datasources` | OK |
-| `bw_search` | **HTTP 500 — "BW Search is not activated"** |
-| `bw_list_changeable_transports` | **HTTP 404 — no `cto` collection on this system** |
-
-Three things worth knowing before you deploy:
-
-**1. `bw_search` and `bw_xref` need BW Search switched on.** Until then they return
-HTTP 500 `BW Search is not activated`. Activate and index it in transaction **RSOSM**
-(Configure BW Search). This is the same subsystem that buffers `S_RS_*` role changes
-for up to a day, so you will be in RSOSM anyway.
-
-**2. First call per ICF handler is very slow, then fast.** Measured cold vs warm on an
-idle trial system:
-
-| call | cold | warm |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `/sap/bw/modeling/discovery` | **71 s** | 0.3–0.8 s |
-| first `bwsearch` | 48 s | — |
-| first `iobj` read | 27 s | — |
+| 401 + basic-auth popup; ICM trace `intermediary is NOT trusted -> remove SSL header fields` | ICM stripped `SSL_CLIENT_CERT` | step 9 — missing, mistyped, lowercase keyword, wrong spacing, or both variants set |
+| `502 Principal propagation failed` | Destination service returned no auth header | check CERTRULE, and that the IdP is trusted + synchronized in the CC |
+| `403 Access denied to resource … expose the resource correctly in your cloud connector` | path not exposed | step 7 — a CC message, not an authorization failure |
+| `500 BW Search is not activated` on search / area browsing | BW Search off | RSOSM |
+| `403 No service found for … RV_C_PCMLOG_CDS` on process-chain tools | OData services unpublished | `/IWFND/MAINT_SERVICE` |
+| `404 Version 'M' … does not exist` | object exists only in the active version | affects tools reading the inactive draft; nothing to fix |
+| `415 Requested content type … does not match back-end` | media-type mismatch | should not occur — the client takes versions from discovery; please report it |
 
-This is ICF handler initialisation, not the network. It matters on Cloud Foundry:
-the first tool call after a deploy or an idle period can exceed a client's timeout,
-and each BW endpoint family warms independently. The `/health` endpoint does **not**
-touch BW, so the CF health check is unaffected. If first-call latency is a problem,
-warm the discovery endpoint with a technical user after deploy.
+Traces: SMICM → Goto → Trace → Level 2; CC loggers to All/Debug; SM50 → Taskhandler +
+Security + ICF at level 2. SAP guides: KBA **3361376259** (propagation over HTTPS — the
+main one), **3367280** (401 / credential popup), **3452851** (step-by-step setup),
+**3371621** (common ICM parameter mistakes).
 
-**3. Endpoint availability varies by system.** `cto` (transport listing) is absent
-from this system's discovery document entirely, so `bw_list_changeable_transports`
-404s. Check the collections advertised by `/sap/bw/modeling/discovery` on your target
-before assuming a tool is available.
+## Scope and limits
 
-Reproduce with `node scripts/live-probe.mjs` (reads credentials from an external env
-file; see the script header).
-
-## Live on Cloud Foundry with principal propagation (2026-07-22)
-
-Deployed to CF (us10-001) against an **ABAP Platform 2025 / SAP_BASIS 816** trial with
-embedded `SAP_BW`, reached through a `PrincipalPropagation` destination and the Cloud
-Connector. **The full chain is proven**: MCP client → XSUAA → Destination service →
-connectivity proxy → Cloud Connector → BW, with the caller's own identity. The server
-log line `Loaded media types from discovery: {...32 types...}` is a real BW response
-fetched under a per-user certificate.
-
-### What works on this system
-
-| Tool | Example arguments |
-|---|---|
-| `bw_list_contents` | `{"path": "/"}` — root only, see below |
-| `bw_get_infoobject` | `{"infoobject_name": "0CALDAY"}` |
-| `bw_get_infoarea` | `{"name": "0BW"}` |
-| `bw_list_source_systems` | `{}` |
-| `bw_get_source_system` | `{"source_system": "A4HCLNT001"}` |
-| `bw_list_datasources` | `{"source_system": "A4HCLNT001"}` |
-
-### What is blocked, and by what
-
-| Blocked | Cause | Fix |
-|---|---|---|
-| `bw_search`, `bw_xref`, and `bw_list_contents` for **sub**-areas | HTTP 500 `BW Search is not activated` (`RSOS_SEARCH 113`) | activate + index BW Search in **RSOSM** |
-| `bw_list_process_chain_runs`, `..._last_status`, `bw_get_process_chain_run_detail` | HTTP 403 `No service found for ... RV_C_PCMLOG_CDS` | publish the OData services in `/IWFND/MAINT_SERVICE` |
-| `bw_list_changeable_transports` | no `cto` collection in this system's discovery | none — endpoint absent |
-| `bw_get_adso`, `bw_get_dataflow` on BI-Content objects | HTTP 404 `Version 'M' of DataStore object ... does not exist` | see below |
-
-The last one is a design characteristic rather than a configuration gap: these tools
-read the **inactive (`/m`) draft**, and BI-Content objects delivered active-only have no
-M version. On a system whose content is all active, they cannot return anything. Making
-them fall back to `/a` would change what the tool returns (active instead of draft), so
-it is deliberately left alone rather than changed silently.
-
-### Two bugs this found
-
-Both were invisible until a real system answered, and both are inherited from upstream:
-
-1. **Module-load snapshots of `MEDIA_TYPES`.** `const ADSO_ACCEPT = MEDIA_TYPES['adso']`
-   evaluates at import time — before `loadMediaTypes()` has run — so the hardcoded
-   fallback is captured permanently. On a system advertising `adso-v1_2_0` the client
-   kept asking for the seeded `v1_7_0` and BW answered
-   `HTTP 415 Requested content type ... does not match back-end content type`. Fixed in
-   `adso.ts` and `transformation.ts` by reading at call time.
-2. **Discovery could not downgrade a media type.** The parser only accepted a discovered
-   version `>=` the seeded one ("never downgrade"), so an older backend could never
-   correct the fallback. Discovery is the system's authoritative statement of what it
-   accepts and now always wins.
-
-## Known unknowns
-
-- `/sap/bw/modeling` is an **undocumented internal protocol** — no published contract,
-  no statement of third-party support. It serves the Eclipse BW Modeling Tools, which
-  primarily tunnel ADT over *RFC*, not HTTP. Re-run the tool suite after any BW upgrade.
-- There is **no SAP documentation** of BW Modeling Tools over Cloud Connector, or of
-  principal propagation combined with ADT. Prove it with one destination, one CERTRULE
-  rule and one GET before building on it.
-- Whether `S_ADT_RES` needs `/sap/bc/*` for this build is untested; the sources disagree.
-
-## BW Bridge is a different project
-
-None of the above applies to SAP BW Bridge: no Cloud Connector for developer access,
-service-key + browser logon instead, ABAP Cloud IAM business roles instead of PFCG, and
-principal propagation is not documented for it at all. It also exposes no REST/OData API
-for modeling objects. This deployment is **on-premise BW/4HANA only**.
+- **On-premise BW/4HANA only.** SAP BW Bridge works differently — no Cloud Connector for
+  developer access, ABAP Cloud IAM instead of PFCG, no REST API for modeling objects, and
+  principal propagation is not documented for it.
+- **`/sap/bw/modeling` is an undocumented internal protocol.** It serves the Eclipse BW
+  Modeling Tools; SAP publishes no contract and states no third-party support. Pin your
+  BW support-package level and re-run `scripts/live-probe.mjs` after upgrades.
+- **Tool availability varies by system** — the discovery document, BW Search, and which
+  OData services are published all change what works. `scripts/live-probe.mjs` reports
+  this for a given system.
+- Two scopes exist internally: `read` (metadata) and `data` (`bw_query_data`,
+  `bw_preview_datasource`, which return actual rows). The shipped collection grants both;
+  for a metadata-only audience add a collection referencing `$XSAPPNAME.read` alone —
+  out-of-scope tools then disappear from `tools/list` rather than failing on call.

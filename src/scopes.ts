@@ -4,8 +4,9 @@
  * Two scopes, because there are two meaningfully different things a caller can read:
  *
  *   read  — modelling metadata: object definitions, dependencies, transports,
- *           process-chain runs. 38 of the 39 tools.
- *   data  — actual BW *data*: `bw_query_data` executes a query and returns rows.
+ *           process-chain runs. 38 of the 40 tools.
+ *   data  — actual BW *data*: `bw_query_data` executes a query and returns rows;
+ *           `bw_preview_datasource` samples straight from the source system.
  *           ARC-1 draws the same line with allowDataPreview, and for the same reason:
  *           "may inspect the model" and "may see the numbers" are different grants,
  *           and in BW the numbers are often the regulated part.

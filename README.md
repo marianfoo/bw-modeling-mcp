@@ -8,11 +8,11 @@ objects via the internal REST API used by Eclipse BWMT.
 > It diverges from [dnic-dev/bw-modeling-mcp](https://github.com/dnic-dev/bw-modeling-mcp)
 > upstream in three ways:
 >
-> - **39 tools, all reads.** The 42 write tools are *deleted*, not flag-gated — along
->   with the lock/CSRF/activate machinery behind them. There is no configuration that
->   turns writing back on. This matters because neither `S_ADT_RES` (a URI allowlist
->   with no activity field) nor the Cloud Connector ACL (path match, no method filter)
->   can tell a read from a write, so the tool surface is one of only two real controls.
+> - **40 tools, all reads.** The 42 write tools are *deleted*, not flag-gated — along
+>   with the lock/activate machinery behind them. There is no configuration that turns
+>   writing back on. This matters because neither `S_ADT_RES` (a URI allowlist with no
+>   activity field) nor the Cloud Connector ACL (path match, no method filter) can tell
+>   a read from a write, so the tool surface is one of only two real controls.
 > - **Per-user identity.** On BTP it authenticates callers with XSUAA and reaches BW
 >   through **principal propagation** — every caller hits BW as themselves, subject to
 >   their own ABAP authorizations, not a shared technical user.
