@@ -23,7 +23,9 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 
 export type Scope = 'read' | 'data';
 
-const DATA_TOOLS = new Set(['bw_query_data']);
+// Both return actual rows rather than model metadata: bw_query_data executes a BW
+// query, bw_preview_datasource samples straight from the source system.
+const DATA_TOOLS = new Set(['bw_query_data', 'bw_preview_datasource']);
 
 export function requiredScope(toolName: string): Scope {
   return DATA_TOOLS.has(toolName) ? 'data' : 'read';

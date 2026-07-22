@@ -23,7 +23,7 @@ import { bwGetQuery } from './tools/query.js';
 import { bwGetCompositeProvider } from './tools/composite_provider.js';
 import { bwGetCkf, bwGetRkf, bwGetStructure } from './tools/cp_components.js';
 import { bwListContents } from './tools/repository.js';
-import { bwListSourceSystems, bwListDatasources, bwGetSourceSystem, bwGetDatasource, bwListRemoteEntities } from './tools/datasource.js';
+import { bwListSourceSystems, bwListDatasources, bwGetSourceSystem, bwGetDatasource, bwListRemoteEntities, bwPreviewDatasource } from './tools/datasource.js';
 import { bwGetDataflow } from './tools/dataflow.js';
 import { bwQueryData, bwGetFilterValues, InfoObjectState, VariableInput, DrillOperation } from './tools/reporting.js';
 import { bwGetRoles, bwGetQueryRoles, bwGetRoleQueries } from './tools/roles.js';
@@ -541,6 +541,35 @@ export function createServer(): Server {
               type: 'string',
               enum: ['text', 'raw'],
               description: 'Output format. "text" (default): compact human-readable summary. "raw": raw XML from BW.',
+            },
+          },
+          required: ['datasource_name', 'source_system'],
+        },
+      },
+      {
+        name: 'bw_preview_datasource',
+        description:
+          'Fetch a live data preview / sample rows from a DataSource (RSDS) — ' +
+          'reads the first N rows directly from the source system and returns them ' +
+          'as a formatted table with field names as column headers. ' +
+          'Use this when the user wants to see, sample, preview, or inspect the actual ' +
+          'data behind a DataSource (e.g. "show me data from DS_X", "preview 50 rows", ' +
+          '"what does DS_X look like"). ' +
+          'For data from an aDSO, CompositeProvider, or BEx query, use bw_query_data instead.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            datasource_name: {
+              type: 'string',
+              description: 'DataSource name (e.g. "DS_NAME"). Case-insensitive.',
+            },
+            source_system: {
+              type: 'string',
+              description: 'Logical source system name (e.g. "LSYS_NAME"). Case-insensitive.',
+            },
+            records: {
+              type: 'number',
+              description: 'Number of records to fetch (default: 20). SAP returns at most this many rows.',
             },
           },
           required: ['datasource_name', 'source_system'],
@@ -1277,6 +1306,15 @@ export function createServer(): Server {
             args?.datasource_name as string,
             args?.source_system as string,
             args?.format as 'text' | 'raw' | undefined ?? 'text',
+          );
+          break;
+
+        case 'bw_preview_datasource':
+          text = await bwPreviewDatasource(
+            client,
+            args?.datasource_name as string,
+            args?.source_system as string,
+            (args?.records as number | undefined) ?? 20,
           );
           break;
 

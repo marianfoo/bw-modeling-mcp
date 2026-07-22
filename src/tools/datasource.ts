@@ -646,3 +646,98 @@ export async function bwListRemoteEntities(
 
 // ── bwSetDatasourceFields ────────────────────────────────────────────────────────
 
+export async function bwPreviewDatasource(
+  client: BwClient,
+  datasourceName: string,
+  sourceSystem: string,
+  records: number = 20,
+): Promise<string> {
+  const structureUrl = `/sap/bw/modeling/rsds/${datasourceName.toLowerCase()}/${sourceSystem.toUpperCase()}/m`;
+  const { body: structureBody } = await client.get(structureUrl, RSDS_ACCEPT);
+
+  const segMatch = structureBody.match(/<segment\b[^>]*ID="0001"[^>]*>([\s\S]*?)<\/segment>/);
+  const segBody = segMatch?.[1] ?? '';
+
+  const fieldEntries: Array<{ name: string; position: number }> = [];
+  const fieldRe = /<field\b([\s\S]*?)>([\s\S]*?)<\/field>/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = fieldRe.exec(segBody)) !== null) {
+    const fTag = fm[1];
+    const fBody = fm[2];
+    const fieldName = fTag.match(/\bname="([^"]*)"/)?.[1] ?? '';
+    const fpMatch = fBody.match(/<fieldProperties\b([\s\S]*?)(?:\/>|>)/);
+    const fpAttrs = fpMatch?.[1] ?? '';
+    const transferRaw = fpAttrs.match(/\btransfer="([^"]*)"/)?.[1];
+    if (transferRaw === 'false') continue;
+    const posRaw = fpAttrs.match(/\bposition="([^"]*)"/)?.[1];
+    const position = posRaw !== undefined ? parseInt(posRaw, 10) : 0;
+    fieldEntries.push({ name: fieldName, position });
+  }
+  fieldEntries.sort((a, b) => a.position - b.position);
+  const fieldNames = fieldEntries.map(f => f.name);
+
+  const url = `/sap/bw/modeling/rsdsint/dataprev/${datasourceName.toUpperCase()}/${sourceSystem.toUpperCase()}?records=${records}&external=true`;
+  const csrfToken = await client.getCsrfToken();
+  const { body: previewBody } = await client.rawPost(url, '', {
+    'x-csrf-token': csrfToken,
+    'X-sap-adt-profiling': 'server-time',
+  });
+
+  const contentMatch = previewBody.match(/<simpleParams\b[^>]*\bcontent="([^"]*)"/);
+  const content = contentMatch?.[1] ?? '';
+  const decoded = Buffer.from(content, 'base64').toString('utf-8');
+  const parsed = JSON.parse(decoded) as { T_DATA_0001?: string[][] };
+  const rows: string[][] = parsed['T_DATA_0001'] ?? [];
+
+  const summaryHeader = [
+    `DataSource: ${datasourceName.toUpperCase()} / Source System: ${sourceSystem.toUpperCase()}`,
+    `Records: ${rows.length} (requested: ${records})`,
+  ].join('\n');
+
+  if (rows.length === 0) {
+    return `${summaryHeader}\n(no data returned)`;
+  }
+
+  const columnCount = rows[0].length;
+  let headers: string[];
+  let mismatchWarning: string | null = null;
+  if (fieldNames.length !== columnCount) {
+    headers = Array.from({ length: columnCount }, (_, i) => `COL_${i + 1}`);
+    mismatchWarning = `Warning: field count mismatch (fields: ${fieldNames.length}, columns: ${columnCount}) — column names may be incorrect.`;
+  } else {
+    headers = fieldNames;
+  }
+
+  const MAX_WIDTH = 30;
+  const truncate = (s: string): string => (s.length > MAX_WIDTH ? s.slice(0, 27) + '...' : s);
+
+  const truncatedRows = rows.map(row => row.map(truncate));
+  const truncatedHeaders = headers.map(truncate);
+
+  const widths: number[] = truncatedHeaders.map((h, i) => {
+    let w = h.length;
+    for (const row of truncatedRows) {
+      const cell = row[i] ?? '';
+      if (cell.length > w) w = cell.length;
+    }
+    return Math.min(w, MAX_WIDTH);
+  });
+
+  const formatRow = (cells: string[]): string =>
+    cells.map((c, i) => c.padEnd(widths[i])).join(' ');
+
+  const headerLine = formatRow(truncatedHeaders);
+  const sepLine = widths.map(w => '-'.repeat(w)).join(' ');
+
+  const lines: string[] = [summaryHeader, '', headerLine, sepLine];
+  for (const row of truncatedRows) {
+    const cells = headers.map((_, i) => row[i] ?? '');
+    lines.push(formatRow(cells));
+  }
+  if (mismatchWarning) {
+    lines.push('');
+    lines.push(mismatchWarning);
+  }
+
+  return lines.join('\n');
+}
